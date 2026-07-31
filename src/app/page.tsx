@@ -1,8 +1,17 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import CounselBot, { type BotState } from "@/components/CounselBot";
+import { useDictation, useNarration } from "@/lib/speech";
 import {
   DEVELOPER,
   DISCLAIMER,
@@ -10,71 +19,110 @@ import {
   GREETING,
   JURISDICTIONS,
   LANGUAGES,
+  SPEECH_LOCALE,
   SUGGESTIONS,
+  VOICE_UI,
+  resolveLocale,
   type EffortId,
   type JurisdictionId,
   type LanguageId,
+  type Source,
 } from "@/lib/counsel";
 
-type Turn = { id: string; role: "user" | "assistant"; content: string };
+type Turn = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  sources?: Source[];
+};
 
-const STORAGE_KEY = "counsel-pinto/session-v1";
+const STORAGE_KEY = "counsel-pinto/session-v2";
 
 type Persisted = {
   turns: Turn[];
   jurisdiction: JurisdictionId;
   language: LanguageId;
   effort: EffortId;
+  research: boolean;
+  autoSpeak: boolean;
 };
 
 function newId() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+/* False during SSR and the hydration pass, true thereafter. Until it flips we
+ * render a neutral shell, so restoring the saved session in a lazy state
+ * initialiser cannot produce a hydration mismatch — and no effect has to call
+ * setState to bring the session back. */
+const neverChanges = () => () => {};
+const onClient = () => true;
+const onServer = () => false;
+
+function loadPersisted(): Partial<Persisted> {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Partial<Persisted>) : {};
+  } catch {
+    return {}; // corrupted storage — start fresh
+  }
+}
+
 export default function Page() {
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [boot] = useState<Partial<Persisted>>(loadPersisted);
+  const [turns, setTurns] = useState<Turn[]>(boot.turns ?? []);
   const [input, setInput] = useState("");
-  const [jurisdiction, setJurisdiction] = useState<JurisdictionId>("auto");
-  const [language, setLanguage] = useState<LanguageId>("auto");
-  const [effort, setEffort] = useState<EffortId>("high");
+  const [jurisdiction, setJurisdiction] = useState<JurisdictionId>(
+    boot.jurisdiction ?? "auto",
+  );
+  const [language, setLanguage] = useState<LanguageId>(boot.language ?? "auto");
+  const [effort, setEffort] = useState<EffortId>(boot.effort ?? "high");
+  const [research, setResearch] = useState(boot.research ?? true);
+  const [autoSpeak, setAutoSpeak] = useState(boot.autoSpeak ?? false);
   const [busy, setBusy] = useState(false);
+  const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
-  const [hydrated, setHydrated] = useState(false);
+  const hydrated = useSyncExternalStore(neverChanges, onClient, onServer);
 
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Restore the previous session.
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw) as Partial<Persisted>;
-        if (Array.isArray(saved.turns)) setTurns(saved.turns);
-        if (saved.jurisdiction) setJurisdiction(saved.jurisdiction);
-        if (saved.language) setLanguage(saved.language);
-        if (saved.effort) setEffort(saved.effort);
-      }
-    } catch {
-      /* corrupted storage — start fresh */
-    }
-    setHydrated(true);
-  }, []);
+  const spoken = resolveLocale(language);
+  const locale = SPEECH_LOCALE[spoken];
+  const copy = VOICE_UI[spoken];
+
+  const narration = useNarration(locale);
+
+  // Keep the latest settings reachable from the dictation callback without
+  // re-creating the recogniser on every keystroke.
+  const sendRef = useRef<(text: string) => void>(() => {});
+  const dictation = useDictation(locale, (text) => sendRef.current(text));
 
   useEffect(() => {
     if (!hydrated) return;
-    const payload: Persisted = { turns, jurisdiction, language, effort };
+    const payload: Persisted = {
+      turns,
+      jurisdiction,
+      language,
+      effort,
+      research,
+      autoSpeak,
+    };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch {
       /* quota exceeded — not fatal */
     }
-  }, [hydrated, turns, jurisdiction, language, effort]);
+  }, [hydrated, turns, jurisdiction, language, effort, research, autoSpeak]);
 
   useEffect(() => {
+    // Don't drag the empty state out of view on first paint — only follow
+    // along once there is a conversation to follow.
+    if (turns.length === 0) return;
     scrollRef.current?.scrollTo({
       top: scrollRef.current.scrollHeight,
       behavior: "smooth",
@@ -91,6 +139,7 @@ export default function Page() {
       const question = text.trim();
       if (!question || busy) return;
 
+      narration.cancel();
       setError(null);
       setNotice(null);
       setInput("");
@@ -105,6 +154,8 @@ export default function Page() {
       const controller = new AbortController();
       abortRef.current = controller;
 
+      let spokenText = "";
+
       try {
         const res = await fetch("/api/chat", {
           method: "POST",
@@ -115,6 +166,7 @@ export default function Page() {
             jurisdiction,
             language,
             effort,
+            research,
           }),
         });
 
@@ -133,14 +185,25 @@ export default function Page() {
           if (!raw.trim()) return;
           const evt = JSON.parse(raw) as
             | { type: "text"; text: string }
+            | { type: "searching"; active: boolean }
+            | { type: "sources"; sources: Source[] }
             | { type: "notice"; text: string }
             | { type: "error"; message: string }
             | { type: "done" };
 
           if (evt.type === "text") {
+            spokenText += evt.text;
             setTurns((prev) =>
               prev.map((t) =>
                 t.id === assistantId ? { ...t, content: t.content + evt.text } : t,
+              ),
+            );
+          } else if (evt.type === "searching") {
+            setSearching(evt.active);
+          } else if (evt.type === "sources") {
+            setTurns((prev) =>
+              prev.map((t) =>
+                t.id === assistantId ? { ...t, sources: evt.sources } : t,
               ),
             );
           } else if (evt.type === "notice") {
@@ -159,26 +222,36 @@ export default function Page() {
           for (const l of lines) consume(l);
         }
         consume(buffer);
+
+        if (autoSpeak && spokenText.trim()) narration.speak(spokenText);
       } catch (err) {
         if ((err as Error).name !== "AbortError") {
           setError(err instanceof Error ? err.message : "Something went wrong.");
         }
       } finally {
         setBusy(false);
+        setSearching(false);
         abortRef.current = null;
-        // Drop an assistant turn that never produced anything.
         setTurns((prev) =>
           prev.filter((t) => !(t.id === assistantId && t.content === "")),
         );
       }
     },
-    [busy, turns, jurisdiction, language, effort],
+    [busy, turns, jurisdiction, language, effort, research, autoSpeak, narration],
   );
 
-  const stop = () => abortRef.current?.abort();
+  useEffect(() => {
+    sendRef.current = (text: string) => void send(text);
+  }, [send]);
+
+  const stop = () => {
+    abortRef.current?.abort();
+    narration.cancel();
+  };
 
   const reset = () => {
     stop();
+    dictation.stop();
     setTurns([]);
     setError(null);
     setNotice(null);
@@ -201,9 +274,14 @@ export default function Page() {
     ].join("\n");
 
     const body = turns
-      .map(
-        (t) => `## ${t.role === "user" ? "Question" : "Counsel Pinto"}\n\n${t.content}`,
-      )
+      .map((t) => {
+        const head = `## ${t.role === "user" ? "Question" : "Counsel Pinto"}\n\n${t.content}`;
+        if (!t.sources?.length) return head;
+        const list = t.sources
+          .map((s) => `- [${s.title}](${s.url}) — ${s.host}`)
+          .join("\n");
+        return `${head}\n\n**Sources**\n\n${list}`;
+      })
       .join("\n\n---\n\n");
 
     const footer = `\n\n---\n\n_${DEVELOPER.credit}._\n`;
@@ -226,6 +304,16 @@ export default function Page() {
     }
   };
 
+  const botState: BotState = dictation.listening
+    ? "listening"
+    : searching
+      ? "searching"
+      : busy
+        ? "thinking"
+        : narration.speaking
+          ? "speaking"
+          : "idle";
+
   const suggestions = SUGGESTIONS.filter(
     (s) => jurisdiction === "auto" || s.jurisdiction === jurisdiction,
   ).slice(0, 4);
@@ -237,14 +325,24 @@ export default function Page() {
     setLanguage,
     effort,
     setEffort,
+    research,
+    setResearch,
+    autoSpeak,
+    setAutoSpeak,
+    narrationSupported: narration.supported,
     reset,
     exportTranscript,
     canExport: turns.length > 0,
   };
 
+  // Server render and hydration pass: a neutral frame that does not depend on
+  // restored session state, so the two markups always agree.
+  if (!hydrated) return <Shell />;
+
   return (
     <div className="flex h-dvh flex-col">
       <Header
+        botState={botState}
         jurisdictionLabel={activeJurisdiction.short}
         onTogglePanel={() => setPanelOpen((v) => !v)}
         panelOpen={panelOpen}
@@ -276,6 +374,7 @@ export default function Page() {
             <div className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6">
               {turns.length === 0 ? (
                 <EmptyState
+                  botState={botState}
                   greeting={GREETING[language]}
                   jurisdictionBlurb={activeJurisdiction.blurb}
                   suggestions={suggestions}
@@ -284,12 +383,28 @@ export default function Page() {
               ) : (
                 <div className="space-y-6">
                   {turns.map((t) => (
-                    <Message key={t.id} turn={t} />
+                    <Message
+                      key={t.id}
+                      turn={t}
+                      botState={botState}
+                      canSpeak={narration.supported}
+                      speaking={narration.speaking}
+                      onSpeak={() =>
+                        narration.speaking
+                          ? narration.cancel()
+                          : narration.speak(t.content)
+                      }
+                    />
                   ))}
-                  {busy && <Thinking />}
+                  {busy && <Working searching={searching} />}
                 </div>
               )}
 
+              {dictation.error && (
+                <Banner tone="notice" className="mt-6">
+                  {dictation.error}
+                </Banner>
+              )}
               {notice && (
                 <Banner tone="notice" className="mt-6">
                   {notice}
@@ -304,7 +419,7 @@ export default function Page() {
           </div>
 
           <Composer
-            value={input}
+            value={dictation.listening ? dictation.transcript || input : input}
             onChange={setInput}
             onSubmit={() => void send(input)}
             onKeyDown={onKeyDown}
@@ -312,6 +427,8 @@ export default function Page() {
             busy={busy}
             textareaRef={textareaRef}
             jurisdictionLabel={activeJurisdiction.short}
+            dictation={dictation}
+            copy={copy}
           />
         </main>
       </div>
@@ -321,17 +438,43 @@ export default function Page() {
 
 /* ---------------- pieces ---------------- */
 
+/** Pre-hydration frame. Same on the server and the first client render. */
+function Shell() {
+  return (
+    <div className="flex h-dvh flex-col">
+      <header className="flex shrink-0 items-center gap-3 border-b border-line bg-surface px-4 py-2.5 sm:px-6">
+        <CounselBot state="idle" size={34} />
+        <span className="font-serif text-lg font-semibold tracking-tight">
+          Counsel Pinto
+        </span>
+        <span className="hidden truncate text-xs text-muted sm:inline">
+          AI Legal Counsel · Cameroon · Mozambique · CEMAC
+        </span>
+      </header>
+      <div className="flex-1" />
+      <div className="shrink-0 border-t border-line bg-surface">
+        <div className="mx-auto w-full max-w-3xl px-4 py-3 sm:px-6">
+          <div className="h-[46px] rounded-2xl border border-line bg-background" />
+          <p className="mt-2 text-center text-[11px] text-muted">{DISCLAIMER}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Header({
+  botState,
   jurisdictionLabel,
   onTogglePanel,
   panelOpen,
 }: {
+  botState: BotState;
   jurisdictionLabel: string;
   onTogglePanel: () => void;
   panelOpen: boolean;
 }) {
   return (
-    <header className="flex shrink-0 items-center gap-3 border-b border-line bg-surface px-4 py-3 sm:px-6">
+    <header className="flex shrink-0 items-center gap-3 border-b border-line bg-surface px-4 py-2.5 sm:px-6">
       <button
         onClick={onTogglePanel}
         aria-expanded={panelOpen}
@@ -350,6 +493,8 @@ function Header({
         </svg>
       </button>
 
+      <CounselBot state={botState} size={34} />
+
       <div className="flex min-w-0 items-baseline gap-2">
         <span className="font-serif text-lg font-semibold tracking-tight">
           Counsel Pinto
@@ -366,6 +511,47 @@ function Header({
   );
 }
 
+function Toggle({
+  label,
+  hint,
+  checked,
+  onChange,
+  disabled,
+}: {
+  label: string;
+  hint: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className="flex w-full items-start gap-3 rounded-lg px-1 py-1.5 text-left hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-40"
+    >
+      <span
+        className={`mt-0.5 flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition ${
+          checked ? "bg-accent" : "bg-line"
+        }`}
+      >
+        <span
+          className={`h-4 w-4 rounded-full bg-surface transition-transform ${
+            checked ? "translate-x-4" : ""
+          }`}
+        />
+      </span>
+      <span className="min-w-0">
+        <span className="block text-sm font-medium">{label}</span>
+        <span className="block text-[11px] leading-relaxed text-muted">{hint}</span>
+      </span>
+    </button>
+  );
+}
+
 function Sidebar({
   className = "",
   jurisdiction,
@@ -374,6 +560,11 @@ function Sidebar({
   setLanguage,
   effort,
   setEffort,
+  research,
+  setResearch,
+  autoSpeak,
+  setAutoSpeak,
+  narrationSupported,
   reset,
   exportTranscript,
   canExport,
@@ -386,6 +577,11 @@ function Sidebar({
   setLanguage: (v: LanguageId) => void;
   effort: EffortId;
   setEffort: (v: EffortId) => void;
+  research: boolean;
+  setResearch: (v: boolean) => void;
+  autoSpeak: boolean;
+  setAutoSpeak: (v: boolean) => void;
+  narrationSupported: boolean;
   reset: () => void;
   exportTranscript: () => void;
   canExport: boolean;
@@ -393,7 +589,7 @@ function Sidebar({
 }) {
   return (
     <aside className={`flex-col overflow-y-auto bg-surface ${className}`}>
-      <div className="flex flex-1 flex-col gap-6 p-4">
+      <div className="flex flex-1 flex-col gap-5 p-4">
         <Field label="Jurisdiction">
           <div className="space-y-1">
             {JURISDICTIONS.map((j) => (
@@ -448,6 +644,26 @@ function Sidebar({
           </div>
         </Field>
 
+        <Field label="Behaviour">
+          <Toggle
+            label="Search the web"
+            hint="Check current figures and instruments against official sources, and cite them."
+            checked={research}
+            onChange={setResearch}
+          />
+          <Toggle
+            label="Read answers aloud"
+            hint={
+              narrationSupported
+                ? "Speak each reply in the selected language."
+                : "This browser has no speech synthesis."
+            }
+            checked={autoSpeak}
+            onChange={setAutoSpeak}
+            disabled={!narrationSupported}
+          />
+        </Field>
+
         <div className="mt-auto space-y-2 pt-4">
           <button
             onClick={() => {
@@ -493,23 +709,30 @@ function Field({
 }
 
 function EmptyState({
+  botState,
   greeting,
   jurisdictionBlurb,
   suggestions,
   onPick,
 }: {
+  botState: BotState;
   greeting: string;
   jurisdictionBlurb: string;
   suggestions: { title: string; prompt: string }[];
   onPick: (prompt: string) => void;
 }) {
   return (
-    <div className="py-8">
-      <h1 className="font-serif text-2xl font-semibold tracking-tight sm:text-3xl">
-        Counsel Pinto
-      </h1>
-      <p className="mt-3 max-w-xl text-[0.95rem] leading-relaxed">{greeting}</p>
-      <p className="mt-2 max-w-xl text-sm text-muted">{jurisdictionBlurb}</p>
+    <div className="py-6">
+      <div className="flex items-start gap-4">
+        <CounselBot state={botState} size={78} />
+        <div className="min-w-0 flex-1 pt-2">
+          <h1 className="font-serif text-2xl font-semibold tracking-tight sm:text-3xl">
+            Counsel Pinto
+          </h1>
+          <p className="mt-2 max-w-xl text-[0.95rem] leading-relaxed">{greeting}</p>
+          <p className="mt-2 max-w-xl text-sm text-muted">{jurisdictionBlurb}</p>
+        </div>
+      </div>
 
       {suggestions.length > 0 && (
         <div className="mt-8">
@@ -521,7 +744,7 @@ function EmptyState({
               <button
                 key={s.title}
                 onClick={() => onPick(s.prompt)}
-                className="rounded-xl border border-line bg-surface p-3 text-left transition hover:border-accent"
+                className="rounded-xl border border-line bg-surface p-3 text-left transition hover:-translate-y-0.5 hover:border-accent hover:shadow-sm"
               >
                 <span className="block text-sm font-medium">{s.title}</span>
                 <span className="mt-1 line-clamp-2 block text-xs leading-relaxed text-muted">
@@ -536,7 +759,44 @@ function EmptyState({
   );
 }
 
-function Message({ turn }: { turn: Turn }) {
+function Sources({ sources }: { sources: Source[] }) {
+  return (
+    <div className="mt-3 border-t border-line pt-3">
+      <p className="text-[11px] font-semibold uppercase tracking-wider text-muted">
+        Sources consulted
+      </p>
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {sources.map((s, i) => (
+          <a
+            key={s.url}
+            href={s.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={s.title}
+            className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-line bg-background px-2.5 py-1 text-[11px] text-muted transition hover:border-accent hover:text-accent"
+          >
+            <span className="font-mono text-[10px] opacity-60">{i + 1}</span>
+            <span className="truncate">{s.host}</span>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Message({
+  turn,
+  botState,
+  canSpeak,
+  speaking,
+  onSpeak,
+}: {
+  turn: Turn;
+  botState: BotState;
+  canSpeak: boolean;
+  speaking: boolean;
+  onSpeak: () => void;
+}) {
   if (turn.role === "user") {
     return (
       <div className="flex justify-end">
@@ -550,19 +810,28 @@ function Message({ turn }: { turn: Turn }) {
   return (
     <article>
       <div className="mb-2 flex items-center gap-2">
-        <span className="grid h-6 w-6 place-items-center rounded-full bg-accent-soft font-serif text-[11px] font-semibold text-accent">
-          CP
-        </span>
+        <CounselBot state={botState} size={26} />
         <span className="text-xs font-medium text-muted">Counsel Pinto</span>
+        {canSpeak && turn.content && (
+          <button
+            onClick={onSpeak}
+            className="ml-auto rounded-md px-2 py-1 text-[11px] font-medium text-muted transition hover:bg-surface-muted hover:text-accent"
+          >
+            {speaking ? "■ Stop" : "▶ Listen"}
+          </button>
+        )}
       </div>
       <div className="legal-prose rounded-2xl border border-line bg-surface px-4 py-4 sm:px-5">
         <Markdown remarkPlugins={[remarkGfm]}>{turn.content}</Markdown>
+        {turn.sources && turn.sources.length > 0 && (
+          <Sources sources={turn.sources} />
+        )}
       </div>
     </article>
   );
 }
 
-function Thinking() {
+function Working({ searching }: { searching: boolean }) {
   return (
     <div className="flex items-center gap-2 pl-1 text-sm text-muted">
       <span className="flex gap-1">
@@ -574,7 +843,7 @@ function Thinking() {
           />
         ))}
       </span>
-      Researching the position…
+      {searching ? "Checking official sources…" : "Researching the position…"}
     </div>
   );
 }
@@ -599,6 +868,24 @@ function Banner({
   );
 }
 
+function MicIcon({ off }: { off?: boolean }) {
+  return (
+    <svg
+      width="17"
+      height="17"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+    >
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v4" />
+      {off && <line x1="3" y1="3" x2="21" y2="21" />}
+    </svg>
+  );
+}
+
 function Composer({
   value,
   onChange,
@@ -608,6 +895,8 @@ function Composer({
   busy,
   textareaRef,
   jurisdictionLabel,
+  dictation,
+  copy,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -617,6 +906,8 @@ function Composer({
   busy: boolean;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   jurisdictionLabel: string;
+  dictation: ReturnType<typeof useDictation>;
+  copy: (typeof VOICE_UI)["en"];
 }) {
   useEffect(() => {
     const el = textareaRef.current;
@@ -628,16 +919,45 @@ function Composer({
   return (
     <div className="shrink-0 border-t border-line bg-surface">
       <div className="mx-auto w-full max-w-3xl px-4 py-3 sm:px-6">
-        <div className="flex items-end gap-2 rounded-2xl border border-line bg-background p-2 focus-within:border-accent">
+        <div
+          className={`flex items-end gap-2 rounded-2xl border bg-background p-2 transition ${
+            dictation.listening
+              ? "border-accent ring-2 ring-accent/25"
+              : "border-line focus-within:border-accent"
+          }`}
+        >
+          {dictation.supported && (
+            <button
+              onClick={() =>
+                dictation.listening ? dictation.stop() : dictation.start()
+              }
+              aria-label={dictation.listening ? copy.listening : copy.dictate}
+              title={dictation.listening ? copy.listening : copy.dictate}
+              className={`shrink-0 rounded-xl p-2.5 transition ${
+                dictation.listening
+                  ? "bg-accent text-accent-contrast"
+                  : "text-muted hover:bg-surface-muted hover:text-accent"
+              }`}
+            >
+              <MicIcon />
+            </button>
+          )}
+
           <textarea
             ref={textareaRef}
             rows={1}
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={`Describe the facts and your question — ${jurisdictionLabel}…`}
+            readOnly={dictation.listening}
+            placeholder={
+              dictation.listening
+                ? copy.listening
+                : `Describe the facts and your question — ${jurisdictionLabel}…`
+            }
             className="max-h-[220px] flex-1 resize-none bg-transparent px-2 py-1.5 text-[0.9375rem] leading-relaxed outline-none placeholder:text-muted"
           />
+
           {busy ? (
             <button
               onClick={onStop}
@@ -655,8 +975,12 @@ function Composer({
             </button>
           )}
         </div>
+
         <p className="mt-2 text-center text-[11px] text-muted">
-          Enter to send · Shift + Enter for a new line. {DISCLAIMER}
+          {dictation.supported
+            ? "Enter to send · Shift + Enter for a new line · tap the mic to speak."
+            : "Enter to send · Shift + Enter for a new line."}{" "}
+          {DISCLAIMER}
         </p>
         <p className="mt-1 text-center text-[11px] text-muted lg:hidden">
           {DEVELOPER.credit}

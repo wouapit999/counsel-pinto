@@ -163,6 +163,82 @@ body {
   font-weight: 600;
 }
 
+/* ---- Counsel Bot ---- */
+@keyframes bot-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+.bot-float {
+  animation: bot-float 4.5s ease-in-out infinite;
+}
+
+@keyframes bot-ring {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.55;
+  }
+  100% {
+    transform: scale(1.35);
+    opacity: 0;
+  }
+}
+.bot-ring {
+  animation: bot-ring 1.4s ease-out infinite;
+}
+
+@keyframes bot-blip {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+.bot-blip {
+  animation: bot-blip 1s ease-in-out infinite;
+}
+
+@keyframes bot-talk {
+  0%,
+  100% {
+    transform: scaleY(0.45);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.bot-talk {
+  transform-origin: 50px 58px;
+  animation: bot-talk 0.28s ease-in-out infinite;
+}
+
+@keyframes bot-orbit {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.bot-orbit {
+  animation: bot-orbit 2.4s linear infinite;
+}
+
+/* Respect users who ask for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  .bot-float,
+  .bot-ring,
+  .bot-blip,
+  .bot-talk,
+  .bot-orbit,
+  .typing-dot {
+    animation: none !important;
+  }
+}
+
 @keyframes pulse-dot {
   0%,
   80%,
