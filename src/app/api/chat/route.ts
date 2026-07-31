@@ -30,7 +30,9 @@ export async function POST(req: NextRequest) {
     return Response.json(
       {
         error:
-          "ANTHROPIC_API_KEY is not set. Copy .env.example to .env.local, add your key, and restart the dev server.",
+          process.env.VERCEL === "1"
+            ? "This deployment has no ANTHROPIC_API_KEY configured. Add it to the Vercel project's environment variables and redeploy."
+            : "ANTHROPIC_API_KEY is not set. Copy .env.example to .env.local, add your key, and restart the dev server.",
       },
       { status: 500 },
     );

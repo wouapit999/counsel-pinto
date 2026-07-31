@@ -32,8 +32,6 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
-# ...but the placeholder template is safe and the README points at it
-!.env.example
 
 # vercel
 .vercel
@@ -41,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# ...but the placeholder template is safe, and the README points at it.
+# Keep this negation last — a later `.env*` line would re-shadow it.
+!.env.example
