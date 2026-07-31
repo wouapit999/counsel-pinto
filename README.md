@@ -1,36 +1,64 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Counsel Pinto
 
-## Getting Started
+**Developed by Bouquet Innovation S.A**
 
-First, run the development server:
+An AI legal counsel web app for **Cameroon**, **Mozambique** and the **CEMAC region**, answering in English, French or Portuguese.
+
+Every substantive answer comes back in a fixed structure: Short Answer → Legal Basis → Procedural Steps → Risks & Considerations → Recommended Action → Templates.
+
+## Stack
+
+- Next.js 16 (App Router) + React 19 + TypeScript
+- Tailwind CSS v4
+- Claude Opus 5 via the Anthropic TypeScript SDK, streamed
+
+## Setup
 
 ```bash
+cp .env.example .env.local   # then add your ANTHROPIC_API_KEY
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## What's where
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| Path | Purpose |
+| --- | --- |
+| `src/lib/counsel.ts` | Persona, jurisdiction + language directives, starter questions. Edit the prompt here. |
+| `src/app/api/chat/route.ts` | Streaming endpoint. Model, token budget and error mapping live here. |
+| `src/app/page.tsx` | Chat UI: jurisdiction/language/depth controls, markdown rendering, transcript export. |
+| `src/app/globals.css` | Design tokens (light + dark) and the `.legal-prose` markdown styling. |
 
-## Learn More
+## Controls
 
-To learn more about Next.js, take a look at the following resources:
+- **Jurisdiction** — pins the answer to Cameroon, Mozambique or CEMAC, or lets the model infer it from the facts. The directive tells it, e.g., not to import OHADA rules into a Mozambican answer.
+- **Reply language** — forces English, French or Portuguese, or mirrors whatever the user wrote in.
+- **Analysis depth** — maps to Claude's `effort` parameter (`medium` / `high` / `xhigh`). Higher is slower and more thorough.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Notes on the prompt
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+`BASE_PERSONA` in `src/lib/counsel.ts` is the cached prefix — it carries a `cache_control` breakpoint, so keep it byte-stable across requests. The jurisdiction and language directives are appended *after* that breakpoint precisely so flipping a selector doesn't invalidate the cache.
 
-## Deploy on Vercel
+The persona instructs the model to summarise and cite legal provisions rather than reproduce them, to flag uncertainty and possible amendments rather than smooth over them, and to decline to predict how a specific court will rule.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Limits
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+This ships legal *information*, not legal advice, and it has no retrieval layer — answers come from the model's training data, so recent amendments may be missed. The persona tells the model to say so and name the official source to verify against, but that is a mitigation, not a guarantee. For anything contentious or high-value, instruct a locally admitted lawyer.
+
+Conversations are stored in the browser's `localStorage` only; nothing is persisted server-side.
+
+## Deployment
+
+Hosted on Vercel. The one required environment variable is `ANTHROPIC_API_KEY` — set it for Production, Preview and Development:
+
+```bash
+vercel env add ANTHROPIC_API_KEY production
+```
+
+Without it the app builds and renders, but every question returns a "key is not set" notice instead of an answer.
+
+---
+
+© Bouquet Innovation S.A. Developed by Bouquet Innovation S.A.
