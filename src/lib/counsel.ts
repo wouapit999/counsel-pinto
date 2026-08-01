@@ -195,24 +195,23 @@ const JURISDICTION_DIRECTIVE: Record<JurisdictionId, string> = {
     "Apply CEMAC-level law: CEMAC regulations and directives, BEAC monetary and foreign-exchange rules, COBAC prudential standards, and the GABAC AML/CFT framework, alongside OHADA where relevant. Flag where a CEMAC instrument requires national transposition and how that affects the answer in practice.",
 };
 
+/**
+ * The persona stays first and byte-stable so the provider's implicit prompt
+ * cache keeps hitting; the per-session directives are appended after it.
+ */
 export function buildSystem(opts: {
   jurisdiction: JurisdictionId;
   language: LanguageId;
-}) {
-  const directives = [
+}): string {
+  return [
+    BASE_PERSONA,
+    ``,
     `## Session settings`,
     ``,
     `**Jurisdiction.** ${JURISDICTION_DIRECTIVE[opts.jurisdiction]}`,
     ``,
     `**Language.** ${LANGUAGE_DIRECTIVE[opts.language]}`,
   ].join("\n");
-
-  return [
-    // Stable prefix — cached.
-    { type: "text" as const, text: BASE_PERSONA, cache_control: { type: "ephemeral" as const } },
-    // Volatile suffix — changes when the user flips a selector.
-    { type: "text" as const, text: directives },
-  ];
 }
 
 export const GREETING: Record<LanguageId, string> = {
