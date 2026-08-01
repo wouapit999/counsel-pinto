@@ -199,9 +199,14 @@ const JURISDICTION_DIRECTIVE: Record<JurisdictionId, string> = {
  * The persona stays first and byte-stable so the provider's implicit prompt
  * cache keeps hitting; the per-session directives are appended after it.
  */
+const NO_SEARCH_DIRECTIVE = `**No web access this session.** The "Sources" section above does not apply: you have no search tool right now. Never imply you looked something up, never produce a URL, and never present a figure as current. Answer from what you know, and where the answer depends on a current amount, deadline or the status of an instrument, say plainly that it must be verified and name the official source to check — the ministry, registry or regulator by name. An answer that says "as at my knowledge, X — confirm against Y" is correct here. One that quietly states a figure as though it were checked is not.`;
+
+const SEARCH_DIRECTIVE = `**Web search is available this session.** Use it as described under "Sources".`;
+
 export function buildSystem(opts: {
   jurisdiction: JurisdictionId;
   language: LanguageId;
+  canSearch: boolean;
 }): string {
   return [
     BASE_PERSONA,
@@ -211,6 +216,8 @@ export function buildSystem(opts: {
     `**Jurisdiction.** ${JURISDICTION_DIRECTIVE[opts.jurisdiction]}`,
     ``,
     `**Language.** ${LANGUAGE_DIRECTIVE[opts.language]}`,
+    ``,
+    opts.canSearch ? SEARCH_DIRECTIVE : NO_SEARCH_DIRECTIVE,
   ].join("\n");
 }
 

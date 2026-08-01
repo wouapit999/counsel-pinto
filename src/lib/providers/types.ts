@@ -1,0 +1,75 @@
+import type { EffortId, Source } from "@/lib/counsel";
+
+/** Every provider the app knows how to talk to. */
+export type ProviderId =
+  | "gemini"
+  | "groq"
+  | "cerebras"
+  | "mistral"
+  | "openrouter"
+  | "github"
+  | "perplexity";
+
+export type Turn = { role: "user" | "assistant"; content: string };
+
+export type StreamArgs = {
+  system: string;
+  turns: Turn[];
+  effort: EffortId;
+  /** Only honoured when the provider can actually search. */
+  research: boolean;
+  signal?: AbortSignal;
+};
+
+/** What an adapter emits. The route serialises these straight to the client. */
+export type StreamEvent =
+  | { type: "text"; text: string }
+  | { type: "searching"; active: boolean }
+  | { type: "sources"; sources: Source[] }
+  | { type: "notice"; text: string };
+
+export type Adapter = (
+  spec: ResolvedProvider,
+  args: StreamArgs,
+) => AsyncGenerator<StreamEvent>;
+
+/** Static description of a provider — no secrets, safe to send to the client. */
+export type ProviderSpec = {
+  id: ProviderId;
+  label: string;
+  /** Environment variable holding the key. */
+  envKey: string;
+  /** Overrides the default model, e.g. GROQ_MODEL. */
+  envModel: string;
+  defaultModel: string;
+  /** Where to get a key. */
+  console: string;
+  /** Honest one-liner about cost. */
+  pricing: string;
+  free: boolean;
+  /** Can it retrieve live web sources and cite them? */
+  supportsSearch: boolean;
+  /** Does it accept OpenAI's `reasoning_effort`? */
+  supportsReasoningEffort: boolean;
+  /** Absent for Gemini, which uses its own SDK. */
+  baseUrl?: string;
+};
+
+export type ResolvedProvider = ProviderSpec & {
+  apiKey: string;
+  model: string;
+};
+
+/** Shape returned by /api/config — never includes the key itself. */
+export type ProviderStatus = {
+  ready: boolean;
+  id: ProviderId;
+  label: string;
+  model: string;
+  supportsSearch: boolean;
+  pricing: string;
+  console: string;
+  envKey: string;
+  /** Providers with a key present, so the UI can say what else is available. */
+  configured: ProviderId[];
+};

@@ -10,28 +10,55 @@ Every substantive answer comes back in a fixed structure: Short Answer → Legal
 
 - Next.js 16 (App Router) + React 19 + TypeScript
 - Tailwind CSS v4
-- Google Gemini via `@google/genai`, streamed, with Grounding with Google Search
+- Pluggable model provider — seven supported, five of them free
 
 ## Setup
 
-Get a free API key at **https://aistudio.google.com/apikey** — no card required.
+Pick a provider from the table below, set its key, and run:
 
 ```bash
-cp .env.example .env.local   # then add your GEMINI_API_KEY
+cp .env.example .env.local   # then set one key
 npm install
 npm run dev
 ```
 
-Open http://localhost:3000.
+Open http://localhost:3000. If no key is set the app still runs and tells you what to add — it doesn't error.
 
-The default model is `gemini-flash-latest`, which the free tier covers. Set `GEMINI_MODEL` to override it.
+## Providers
+
+| Provider | Free? | Web search | Key |
+| --- | --- | --- | --- |
+| **Google Gemini** | Yes, no card | **Yes** — Grounding with Google Search | aistudio.google.com/apikey |
+| Groq | Yes, no card | No | console.groq.com/keys |
+| Cerebras | Yes, no card | No | cloud.cerebras.ai |
+| Mistral | Free experimental tier | No | console.mistral.ai/api-keys |
+| OpenRouter | Only on `:free` models | No | openrouter.ai/keys |
+| GitHub Models | Yes, rate-limited | No | github.com/settings/tokens |
+| Perplexity | Paid | **Yes** | perplexity.ai/settings/api |
+
+**Gemini is the one to use.** It is the only provider that is both free and able to retrieve live sources, which is what makes the answers worth trusting on figures and deadlines.
+
+### How the provider is chosen
+
+The app uses the first provider it finds a key for, in the order in the table. Set `AI_PROVIDER` to pin one explicitly when several keys are present. Every model ID is overridable — `GEMINI_MODEL`, `GROQ_MODEL`, and so on — because model IDs are retired regularly; a stale one surfaces as "model not available on X", not a crash.
+
+### When a provider cannot search
+
+The five search-less providers answer from training data, which for law means figures and instrument statuses may be out of date. The app handles this rather than pretending otherwise:
+
+- the **Search the web** toggle is disabled, with the reason shown
+- the system prompt is switched to an explicit no-web-access directive telling the model never to imply it looked something up, never to emit a URL, and to name the registry or regulator to verify against instead
+
+That second point matters most: without it, a model told it has a search tool will cheerfully invent citations.
 
 ## What's where
 
 | Path | Purpose |
 | --- | --- |
 | `src/lib/counsel.ts` | Persona, jurisdiction + language directives, starter questions, speech locales. Edit the prompt here. |
-| `src/app/api/chat/route.ts` | Streaming endpoint. Model, Search grounding, thinking level, source collection, error mapping. |
+| `src/lib/providers/` | Provider layer: `catalog.ts` lists them, `gemini.ts` and `openaiCompat.ts` are the two adapters, `index.ts` resolves the active one from env. |
+| `src/app/api/chat/route.ts` | Streaming endpoint. Thin — picks the provider and forwards its events. |
+| `src/app/api/config/route.ts` | Capability report for the UI (active provider, model, can it search). Never returns key material. |
 | `src/lib/speech.ts` | Dictation and spoken replies, plus the markdown→speech reducer. |
 | `src/components/CounselBot.tsx` | The animated assistant character and its states. |
 | `src/app/page.tsx` | Chat UI: controls, markdown rendering, source chips, transcript export. |
@@ -41,8 +68,8 @@ The default model is `gemini-flash-latest`, which the free tier covers. Set `GEM
 
 - **Jurisdiction** — pins the answer to Cameroon, Mozambique or CEMAC, or lets the model infer it from the facts. The directive tells it, e.g., not to import OHADA rules into a Mozambican answer.
 - **Reply language** — forces English, French or Portuguese, or mirrors whatever the user wrote in.
-- **Analysis depth** — maps to Gemini's `thinkingLevel` (`LOW` / `MEDIUM` / `HIGH`). Higher is slower and more thorough. Deliberately *not* `thinkingBudget`: budgets are model-dependent and are rejected outright by Gemini 3.5 and newer, so a model bump would break the app.
-- **Search the web** — on by default. Enables Grounding with Google Search so the model can check current figures and the status of named instruments against live sources, and cites what it consulted. Grounded requests consume free-tier quota faster; turn it off for questions about settled doctrine.
+- **Analysis depth** — on Gemini this maps to `thinkingLevel` (`LOW` / `MEDIUM` / `HIGH`); deliberately *not* `thinkingBudget`, which is model-dependent and rejected outright by Gemini 3.5 and newer. On Perplexity it maps to `reasoning_effort`. Other providers ignore it.
+- **Search the web** — on by default where supported. Lets the model check current figures and the status of named instruments against live sources, and cite what it consulted. Grounded requests consume free-tier quota faster; turn it off for questions about settled doctrine. Disabled automatically on providers that cannot search.
 - **Read answers aloud** — speaks each reply through the browser's speech synthesis in the selected language.
 
 ## Voice
@@ -73,18 +100,18 @@ Conversations are stored in the browser's `localStorage` only; nothing is persis
 
 ## Deployment
 
-Hosted on Vercel. The one required environment variable is `GEMINI_API_KEY`:
+Hosted on Vercel. Set one provider key — `GEMINI_API_KEY` unless you have a reason to differ. Either paste it into the project's Environment Variables page in the dashboard, or:
 
 ```bash
 vercel env add GEMINI_API_KEY production
 ```
 
-Run it from the project root, and redeploy afterwards — environment variables are read at build time. Without it the app builds and renders, but every question returns a "key is not set" notice instead of an answer.
+Redeploy afterwards — environment variables are read at build time. Without a key the app builds and renders, and shows setup guidance instead of failing.
 
 ### Free-tier caveats
 
 - Rate limits are per minute and per day. Hitting one surfaces as a "rate limit" notice in the UI, not a crash.
-- Free-tier prompts and responses may be used by Google to improve their products. **Do not put privileged or client-identifying facts into this app while it runs on the free tier.** A paid tier changes those terms; check the current AI Studio terms before promising confidentiality to anyone.
+- **Free-tier prompts and responses may be used by the provider to improve their products.** For Gemini's free tier that is the documented position. Do not put privileged or client-identifying facts into this app while it runs on a free tier, and check the current terms before promising confidentiality to anyone.
 - Google's Grounding with Google Search terms require displaying its Search Suggestions alongside grounded answers. This build shows the grounded source domains but not the rendered suggestion chips from `searchEntryPoint`; add them before any public launch.
 
 ---

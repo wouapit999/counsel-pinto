@@ -28,6 +28,7 @@ import {
   type LanguageId,
   type Source,
 } from "@/lib/counsel";
+import type { ProviderStatus } from "@/lib/providers/types";
 
 type Turn = {
   id: string;
@@ -85,6 +86,7 @@ export default function Page() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
+  const [status, setStatus] = useState<ProviderStatus | null>(null);
   const hydrated = useSyncExternalStore(neverChanges, onClient, onServer);
 
   const abortRef = useRef<AbortController | null>(null);
@@ -118,6 +120,23 @@ export default function Page() {
       /* quota exceeded — not fatal */
     }
   }, [hydrated, turns, jurisdiction, language, effort, research, autoSpeak]);
+
+  // Ask the server which provider is live and what it can do, so the controls
+  // reflect reality instead of failing when the user presses them.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/config")
+      .then((r) => (r.ok ? (r.json() as Promise<ProviderStatus>) : null))
+      .then((s) => {
+        if (!cancelled && s) setStatus(s);
+      })
+      .catch(() => {
+        /* leave status null — the composer still works and the route reports */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     // Don't drag the empty state out of view on first paint — only follow
@@ -185,6 +204,7 @@ export default function Page() {
           if (!raw.trim()) return;
           const evt = JSON.parse(raw) as
             | { type: "text"; text: string }
+            | { type: "meta"; provider: string; model: string; searched: boolean }
             | { type: "searching"; active: boolean }
             | { type: "sources"; sources: Source[] }
             | { type: "notice"; text: string }
@@ -330,6 +350,7 @@ export default function Page() {
     autoSpeak,
     setAutoSpeak,
     narrationSupported: narration.supported,
+    status,
     reset,
     exportTranscript,
     canExport: turns.length > 0,
@@ -372,6 +393,10 @@ export default function Page() {
         <main className="flex min-w-0 flex-1 flex-col">
           <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-3xl px-4 py-6 sm:px-6">
+              {status && !status.ready && (
+                <SetupNotice status={status} className="mb-6" />
+              )}
+
               {turns.length === 0 ? (
                 <EmptyState
                   botState={botState}
@@ -565,6 +590,7 @@ function Sidebar({
   autoSpeak,
   setAutoSpeak,
   narrationSupported,
+  status,
   reset,
   exportTranscript,
   canExport,
@@ -582,11 +608,13 @@ function Sidebar({
   autoSpeak: boolean;
   setAutoSpeak: (v: boolean) => void;
   narrationSupported: boolean;
+  status: ProviderStatus | null;
   reset: () => void;
   exportTranscript: () => void;
   canExport: boolean;
   onNavigate?: () => void;
 }) {
+  const canSearch = status?.supportsSearch ?? true;
   return (
     <aside className={`flex-col overflow-y-auto bg-surface ${className}`}>
       <div className="flex flex-1 flex-col gap-5 p-4">
@@ -647,9 +675,14 @@ function Sidebar({
         <Field label="Behaviour">
           <Toggle
             label="Search the web"
-            hint="Check current figures and instruments against official sources, and cite them."
-            checked={research}
+            hint={
+              canSearch
+                ? "Check current figures and instruments against official sources, and cite them."
+                : `${status?.label ?? "This provider"} cannot search. Answers come from training data and will say what to verify.`
+            }
+            checked={canSearch && research}
             onChange={setResearch}
+            disabled={!canSearch}
           />
           <Toggle
             label="Read answers aloud"
@@ -681,6 +714,19 @@ function Sidebar({
           >
             Export transcript
           </button>
+          {status && (
+            <p className="pt-2 text-[11px] leading-relaxed text-muted">
+              {status.ready ? (
+                <>
+                  Answering with <span className="text-foreground">{status.label}</span>{" "}
+                  <span className="font-mono text-[10px]">{status.model}</span>
+                  {status.supportsSearch ? " · can search" : " · no web access"}
+                </>
+              ) : (
+                <>No AI provider configured.</>
+              )}
+            </p>
+          )}
           <p className="pt-2 text-[11px] leading-relaxed text-muted">{DISCLAIMER}</p>
           <p className="border-t border-line pt-3 text-[11px] font-medium text-muted">
             {DEVELOPER.credit}
@@ -755,6 +801,37 @@ function EmptyState({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Shown when no provider key is present — setup guidance, not an error. */
+function SetupNotice({
+  status,
+  className = "",
+}: {
+  status: ProviderStatus;
+  className?: string;
+}) {
+  return (
+    <div
+      className={`rounded-xl border border-accent/40 bg-accent-soft/60 px-4 py-3.5 ${className}`}
+    >
+      <p className="text-sm font-medium">Almost there — no AI provider is configured.</p>
+      <p className="mt-1.5 text-[13px] leading-relaxed text-muted">
+        Set <span className="font-mono text-[11px]">{status.envKey}</span> to a key
+        from{" "}
+        <a
+          href={status.console}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-accent underline underline-offset-2"
+        >
+          {status.label}
+        </a>{" "}
+        — {status.pricing.toLowerCase()} Any other supported provider&apos;s key works
+        too; the app picks up whichever it finds.
+      </p>
     </div>
   );
 }
