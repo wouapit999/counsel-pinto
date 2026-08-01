@@ -6,10 +6,11 @@ import {
   type LanguageId,
 } from "@/lib/counsel";
 import {
+  DEFAULT_PROVIDER,
   PROVIDERS,
-  adapterFor,
   describeError,
   resolveProvider,
+  streamCompletion,
   type Turn,
 } from "@/lib/providers";
 
@@ -32,13 +33,13 @@ export async function POST(req: NextRequest) {
   const provider = resolveProvider();
 
   if (!provider) {
-    const g = PROVIDERS.gemini;
+    const d = PROVIDERS[DEFAULT_PROVIDER];
     return Response.json(
       {
         error:
           process.env.VERCEL === "1"
-            ? `No AI provider is configured on this deployment. Add ${g.envKey} (free — ${g.console}) to the Vercel project's environment variables and redeploy.`
-            : `No AI provider is configured. Copy .env.example to .env.local, add ${g.envKey} (free — ${g.console}), and restart the dev server.`,
+            ? `No AI provider is configured on this deployment. Add ${d.envKey} (free — ${d.console}) to the Vercel project's environment variables and redeploy.`
+            : `No AI provider is configured. Copy .env.example to .env.local, add ${d.envKey} (free — ${d.console}), and restart the dev server.`,
       },
       { status: 500 },
     );
@@ -64,7 +65,7 @@ export async function POST(req: NextRequest) {
 
   // Asking for search on a provider that cannot search is not an error — it
   // just isn't done, and the prompt is told so it won't invent citations.
-  const research = body.research !== false && provider.supportsSearch;
+  const research = body.research !== false && provider.canSearch;
 
   const system = buildSystem({
     jurisdiction: body.jurisdiction ?? "auto",
@@ -84,7 +85,7 @@ export async function POST(req: NextRequest) {
           }),
         );
 
-        const events = adapterFor(provider.id)(provider, {
+        const events = streamCompletion(provider, {
           system,
           turns,
           effort: body.effort ?? "high",

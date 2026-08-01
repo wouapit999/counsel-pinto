@@ -10,7 +10,7 @@ Every substantive answer comes back in a fixed structure: Short Answer → Legal
 
 - Next.js 16 (App Router) + React 19 + TypeScript
 - Tailwind CSS v4
-- Pluggable model provider — seven supported, five of them free
+- Pluggable model provider — six supported, five of them free, no vendor SDK
 
 ## Setup
 
@@ -28,23 +28,26 @@ Open http://localhost:3000. If no key is set the app still runs and tells you wh
 
 | Provider | Free? | Web search | Key |
 | --- | --- | --- | --- |
-| **Google Gemini** | Yes, no card | **Yes** — Grounding with Google Search | aistudio.google.com/apikey |
-| Groq | Yes, no card | No | console.groq.com/keys |
+| **Groq** | Yes, no card | **Yes, on `compound` models** | console.groq.com/keys |
 | Cerebras | Yes, no card | No | cloud.cerebras.ai |
 | Mistral | Free experimental tier | No | console.mistral.ai/api-keys |
-| OpenRouter | Only on `:free` models | No | openrouter.ai/keys |
+| OpenRouter | Only on `:free` models | Only on `:online` models (billed) | openrouter.ai/keys |
 | GitHub Models | Yes, rate-limited | No | github.com/settings/tokens |
-| Perplexity | Paid | **Yes** | perplexity.ai/settings/api |
+| Perplexity | Paid | Yes | perplexity.ai/settings/api |
 
-**Gemini is the one to use.** It is the only provider that is both free and able to retrieve live sources, which is what makes the answers worth trusting on figures and deadlines.
+**Groq is the one to use**, and if the answers need to be current, set `GROQ_MODEL` to a compound model. Those run web search server-side and report what they used, which is the only way to get free *and* sourced. The default (`llama-3.3-70b-versatile`) is the safer starting point but answers from training data alone.
+
+Search capability is a property of the **model**, not the provider — `src/lib/providers/catalog.ts` matches it per model, so switching `GROQ_MODEL` to a compound system enables the search toggle automatically.
 
 ### How the provider is chosen
 
-The app uses the first provider it finds a key for, in the order in the table. Set `AI_PROVIDER` to pin one explicitly when several keys are present. Every model ID is overridable — `GEMINI_MODEL`, `GROQ_MODEL`, and so on — because model IDs are retired regularly; a stale one surfaces as "model not available on X", not a crash.
+The app uses the first provider it finds a key for, in the order in the table. Set `AI_PROVIDER` to pin one explicitly when several keys are present. Every model ID is overridable — `GROQ_MODEL`, `MISTRAL_MODEL`, and so on — because model IDs are retired regularly; a stale one surfaces as "model not available on X", not a crash.
 
-### When a provider cannot search
+All six speak OpenAI's `/chat/completions`, so there is one adapter and no vendor SDK. Citations arrive in three different shapes (Perplexity's `citations` and `search_results`, Groq's `executed_tools`); `openaiCompat.ts` reads all of them and ignores anything it doesn't recognise, because a missing source chip is survivable and an invented one is not.
 
-The five search-less providers answer from training data, which for law means figures and instrument statuses may be out of date. The app handles this rather than pretending otherwise:
+### When a model cannot search
+
+Search-less models answer from training data, which for law means figures and instrument statuses may be out of date. The app handles this rather than pretending otherwise:
 
 - the **Search the web** toggle is disabled, with the reason shown
 - the system prompt is switched to an explicit no-web-access directive telling the model never to imply it looked something up, never to emit a URL, and to name the registry or regulator to verify against instead
@@ -56,7 +59,7 @@ That second point matters most: without it, a model told it has a search tool wi
 | Path | Purpose |
 | --- | --- |
 | `src/lib/counsel.ts` | Persona, jurisdiction + language directives, starter questions, speech locales. Edit the prompt here. |
-| `src/lib/providers/` | Provider layer: `catalog.ts` lists them, `gemini.ts` and `openaiCompat.ts` are the two adapters, `index.ts` resolves the active one from env. |
+| `src/lib/providers/` | Provider layer: `catalog.ts` lists them, `openaiCompat.ts` is the single adapter, `index.ts` resolves the active one from env. |
 | `src/app/api/chat/route.ts` | Streaming endpoint. Thin — picks the provider and forwards its events. |
 | `src/app/api/config/route.ts` | Capability report for the UI (active provider, model, can it search). Never returns key material. |
 | `src/lib/speech.ts` | Dictation and spoken replies, plus the markdown→speech reducer. |
@@ -68,8 +71,8 @@ That second point matters most: without it, a model told it has a search tool wi
 
 - **Jurisdiction** — pins the answer to Cameroon, Mozambique or CEMAC, or lets the model infer it from the facts. The directive tells it, e.g., not to import OHADA rules into a Mozambican answer.
 - **Reply language** — forces English, French or Portuguese, or mirrors whatever the user wrote in.
-- **Analysis depth** — on Gemini this maps to `thinkingLevel` (`LOW` / `MEDIUM` / `HIGH`); deliberately *not* `thinkingBudget`, which is model-dependent and rejected outright by Gemini 3.5 and newer. On Perplexity it maps to `reasoning_effort`. Other providers ignore it.
-- **Search the web** — on by default where supported. Lets the model check current figures and the status of named instruments against live sources, and cite what it consulted. Grounded requests consume free-tier quota faster; turn it off for questions about settled doctrine. Disabled automatically on providers that cannot search.
+- **Analysis depth** — maps to `reasoning_effort` on providers that accept it (currently Perplexity). Others ignore it.
+- **Search the web** — on by default where the active model supports it. Lets the model check current figures and the status of named instruments against live sources, and cite what it consulted. Searches consume free-tier quota faster; turn it off for questions about settled doctrine. Disabled automatically, with the reason shown, on models that cannot search.
 - **Read answers aloud** — speaks each reply through the browser's speech synthesis in the selected language.
 
 ## Voice
@@ -100,10 +103,10 @@ Conversations are stored in the browser's `localStorage` only; nothing is persis
 
 ## Deployment
 
-Hosted on Vercel. Set one provider key — `GEMINI_API_KEY` unless you have a reason to differ. Either paste it into the project's Environment Variables page in the dashboard, or:
+Hosted on Vercel. Set one provider key — `GROQ_API_KEY` unless you have a reason to differ. Either paste it into the project's Environment Variables page in the dashboard, or:
 
 ```bash
-vercel env add GEMINI_API_KEY production
+vercel env add GROQ_API_KEY production
 ```
 
 Redeploy afterwards — environment variables are read at build time. Without a key the app builds and renders, and shows setup guidance instead of failing.
@@ -111,8 +114,8 @@ Redeploy afterwards — environment variables are read at build time. Without a 
 ### Free-tier caveats
 
 - Rate limits are per minute and per day. Hitting one surfaces as a "rate limit" notice in the UI, not a crash.
-- **Free-tier prompts and responses may be used by the provider to improve their products.** For Gemini's free tier that is the documented position. Do not put privileged or client-identifying facts into this app while it runs on a free tier, and check the current terms before promising confidentiality to anyone.
-- Google's Grounding with Google Search terms require displaying its Search Suggestions alongside grounded answers. This build shows the grounded source domains but not the rendered suggestion chips from `searchEntryPoint`; add them before any public launch.
+- **Free tiers commonly reserve the right to use prompts and responses to improve the provider's products.** Do not put privileged or client-identifying facts into this app while it runs on one, and read the specific provider's current terms before promising confidentiality to anyone.
+- Every free model here is materially smaller than a frontier model. On OHADA, CEMAC and Mozambican law specifically, check the first few answers against a source you trust before letting anyone else use it.
 
 ---
 

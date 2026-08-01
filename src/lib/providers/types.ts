@@ -2,7 +2,6 @@ import type { EffortId, Source } from "@/lib/counsel";
 
 /** Every provider the app knows how to talk to. */
 export type ProviderId =
-  | "gemini"
   | "groq"
   | "cerebras"
   | "mistral"
@@ -47,17 +46,24 @@ export type ProviderSpec = {
   /** Honest one-liner about cost. */
   pricing: string;
   free: boolean;
-  /** Can it retrieve live web sources and cite them? */
+  /** True when every model on this provider retrieves live sources. */
   supportsSearch: boolean;
+  /**
+   * Some providers only search on particular models — Groq's compound
+   * systems, for instance. Capability is therefore a property of the
+   * resolved model, not of the provider alone.
+   */
+  searchModels?: RegExp;
   /** Does it accept OpenAI's `reasoning_effort`? */
   supportsReasoningEffort: boolean;
-  /** Absent for Gemini, which uses its own SDK. */
-  baseUrl?: string;
+  baseUrl: string;
 };
 
 export type ResolvedProvider = ProviderSpec & {
   apiKey: string;
   model: string;
+  /** Whether *this* model can search. Use this, not `supportsSearch`. */
+  canSearch: boolean;
 };
 
 /** Shape returned by /api/config — never includes the key itself. */

@@ -3,34 +3,24 @@ import type { ProviderId, ProviderSpec } from "./types";
 /**
  * Providers, best-first.
  *
- * Only Gemini and Perplexity can retrieve live sources. The rest answer from
- * training data alone, which for a legal app means the answers age badly —
- * the UI disables the search toggle and the prompt is told to be franker about
- * currency when one of those is active.
+ * Search is what makes a legal answer checkable, and it is scarce among free
+ * tiers. Groq's `compound` systems are the free option that has it: they run
+ * web search server-side and report what they used. Everything else free here
+ * answers from training data, in which case the prompt is switched to an
+ * explicit no-web-access directive so the model does not invent citations.
  *
- * Model IDs drift. Every one of these is overridable through its `envModel`
- * variable, and a wrong ID surfaces as a clear "model not available" message
- * rather than a crash.
+ * Model IDs drift. Every one is overridable through its `envModel` variable,
+ * and a stale ID surfaces as "model not available", not a crash.
  */
 export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
-  gemini: {
-    id: "gemini",
-    label: "Google Gemini",
-    envKey: "GEMINI_API_KEY",
-    envModel: "GEMINI_MODEL",
-    defaultModel: "gemini-flash-latest",
-    console: "https://aistudio.google.com/apikey",
-    pricing: "Free tier, no card required.",
-    free: true,
-    supportsSearch: true,
-    supportsReasoningEffort: false,
-  },
   groq: {
     id: "groq",
     label: "Groq",
     envKey: "GROQ_API_KEY",
     envModel: "GROQ_MODEL",
+    // Reliable default. Set GROQ_MODEL=groq/compound to turn search on.
     defaultModel: "llama-3.3-70b-versatile",
+    searchModels: /compound/i,
     console: "https://console.groq.com/keys",
     pricing: "Free tier, no card required. Very fast.",
     free: true,
@@ -71,8 +61,10 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     envModel: "OPENROUTER_MODEL",
     // ":free" variants cost nothing but are rate-limited and rotate often.
     defaultModel: "meta-llama/llama-3.3-70b-instruct:free",
+    // The ":online" suffix adds web search, but it is billed per result.
+    searchModels: /:online$/i,
     console: "https://openrouter.ai/keys",
-    pricing: "Free on \":free\" models; paid for the rest.",
+    pricing: 'Free on ":free" models; paid for the rest.',
     free: true,
     supportsSearch: false,
     supportsReasoningEffort: false,
@@ -108,7 +100,6 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
 
 /** Preference order when AI_PROVIDER is not set: searchers first, then free. */
 export const PREFERENCE: ProviderId[] = [
-  "gemini",
   "perplexity",
   "groq",
   "cerebras",
@@ -116,3 +107,8 @@ export const PREFERENCE: ProviderId[] = [
   "openrouter",
   "github",
 ];
+
+/** Does this specific model retrieve live sources? */
+export function modelCanSearch(spec: ProviderSpec, model: string): boolean {
+  return spec.supportsSearch || (spec.searchModels?.test(model) ?? false);
+}

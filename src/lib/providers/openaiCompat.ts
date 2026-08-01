@@ -16,9 +16,21 @@ const REASONING: Record<EffortId, string> = {
   xhigh: "high",
 };
 
-type Delta = { content?: string | null };
-type Choice = { delta?: Delta; message?: { content?: string } };
 type SearchResult = { title?: string; url?: string };
+
+/** Groq's compound systems report what they ran in `executed_tools`. */
+type ExecutedTool = {
+  type?: string;
+  output?: unknown;
+  search_results?: { results?: SearchResult[] } | SearchResult[];
+};
+
+type Delta = { content?: string | null; executed_tools?: ExecutedTool[] };
+type Choice = {
+  delta?: Delta;
+  message?: { content?: string; executed_tools?: ExecutedTool[] };
+};
+
 type Chunk = {
   choices?: Choice[];
   /** Perplexity: bare URLs. */
@@ -28,14 +40,27 @@ type Chunk = {
   error?: { message?: string; code?: string | number };
 };
 
+function add(into: Map<string, Source>, url?: string, title?: string) {
+  if (!url || into.has(url)) return;
+  into.set(url, { title: title || hostOf(url), url, host: hostOf(url) });
+}
+
+/**
+ * Providers disagree about where citations live, so check every shape we
+ * know of. Anything unrecognised is ignored rather than guessed at — a
+ * missing source chip is survivable, a fabricated one is not.
+ */
 function collect(chunk: Chunk, into: Map<string, Source>) {
-  for (const r of chunk.search_results ?? []) {
-    if (!r.url || into.has(r.url)) continue;
-    into.set(r.url, { title: r.title || hostOf(r.url), url: r.url, host: hostOf(r.url) });
-  }
-  for (const url of chunk.citations ?? []) {
-    if (!url || into.has(url)) continue;
-    into.set(url, { title: hostOf(url), url, host: hostOf(url) });
+  for (const r of chunk.search_results ?? []) add(into, r.url, r.title);
+  for (const url of chunk.citations ?? []) add(into, url);
+
+  for (const choice of chunk.choices ?? []) {
+    const tools = choice.delta?.executed_tools ?? choice.message?.executed_tools ?? [];
+    for (const tool of tools) {
+      const raw = tool.search_results;
+      const results = Array.isArray(raw) ? raw : (raw?.results ?? []);
+      for (const r of results) add(into, r.url, r.title);
+    }
   }
 }
 
@@ -84,7 +109,7 @@ export const openAiCompatAdapter: Adapter = async function* (spec, args) {
 
   const sources = new Map<string, Source>();
   let produced = false;
-  let announced = spec.supportsSearch && args.research;
+  let announced = spec.canSearch && args.research;
   if (announced) yield { type: "searching", active: true };
 
   const reader = res.body.getReader();
