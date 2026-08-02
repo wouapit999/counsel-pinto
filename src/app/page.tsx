@@ -99,10 +99,9 @@ export default function Page() {
 
   const narration = useNarration(locale);
 
-  // Keep the latest settings reachable from the dictation callback without
-  // re-creating the recogniser on every keystroke.
-  const sendRef = useRef<(text: string) => void>(() => {});
-  const dictation = useDictation(locale, (text) => sendRef.current(text));
+  // Speech fills the composer; sending stays a deliberate act, so the user can
+  // correct a misheard word before it becomes a legal question.
+  const dictation = useDictation(locale, setInput);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -259,10 +258,6 @@ export default function Page() {
     },
     [busy, turns, jurisdiction, language, effort, research, autoSpeak, narration],
   );
-
-  useEffect(() => {
-    sendRef.current = (text: string) => void send(text);
-  }, [send]);
 
   const stop = () => {
     abortRef.current?.abort();
@@ -425,11 +420,6 @@ export default function Page() {
                 </div>
               )}
 
-              {dictation.error && (
-                <Banner tone="notice" className="mt-6">
-                  {dictation.error}
-                </Banner>
-              )}
               {notice && (
                 <Banner tone="notice" className="mt-6">
                   {notice}
@@ -444,7 +434,7 @@ export default function Page() {
           </div>
 
           <Composer
-            value={dictation.listening ? dictation.transcript || input : input}
+            value={input}
             onChange={setInput}
             onSubmit={() => void send(input)}
             onKeyDown={onKeyDown}
@@ -996,6 +986,22 @@ function Composer({
   return (
     <div className="shrink-0 border-t border-line bg-surface">
       <div className="mx-auto w-full max-w-3xl px-4 py-3 sm:px-6">
+        {/* Anchored to the composer, not the transcript: a microphone failure
+            that scrolls out of view reads as the button doing nothing. */}
+        {dictation.error && (
+          <div className="mb-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[13px] text-amber-800 dark:text-amber-200">
+            {dictation.error}
+          </div>
+        )}
+        {dictation.listening && (
+          <div className="mb-2 flex items-center gap-2 px-1 text-[12px] text-accent">
+            <span className="relative flex h-2 w-2">
+              <span className="bot-ring absolute inline-flex h-full w-full rounded-full bg-accent opacity-70" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-accent" />
+            </span>
+            {copy.listening} Tap the mic again when you have finished.
+          </div>
+        )}
         <div
           className={`flex items-end gap-2 rounded-2xl border bg-background p-2 transition ${
             dictation.listening
@@ -1005,8 +1011,9 @@ function Composer({
         >
           {dictation.supported && (
             <button
+              type="button"
               onClick={() =>
-                dictation.listening ? dictation.stop() : dictation.start()
+                dictation.listening ? dictation.stop() : dictation.start(value)
               }
               aria-label={dictation.listening ? copy.listening : copy.dictate}
               title={dictation.listening ? copy.listening : copy.dictate}
@@ -1026,7 +1033,6 @@ function Composer({
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={onKeyDown}
-            readOnly={dictation.listening}
             placeholder={
               dictation.listening
                 ? copy.listening

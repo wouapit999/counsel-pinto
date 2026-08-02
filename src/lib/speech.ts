@@ -34,6 +34,7 @@ type SpeechRecognitionLike = {
   start: () => void;
   stop: () => void;
   abort: () => void;
+  onstart: (() => void) | null;
   onresult: ((e: RecognitionEvent) => void) | null;
   onerror: ((e: RecognitionErrorEvent) => void) | null;
   onend: (() => void) | null;
@@ -54,8 +55,19 @@ function recognitionCtor(): RecognitionCtor | null {
   return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null;
 }
 
-/** Dictation. `transcript` updates live; `onFinal` fires once per utterance. */
-export function useDictation(locale: string, onFinal: (text: string) => void) {
+/**
+ * Dictation.
+ *
+ * Transcribed text is pushed straight into the caller's input via
+ * `onTranscript` — it is never held here. Speech fills the box; sending stays
+ * the user's decision.
+ *
+ * Chrome ends a recognition session after a few seconds of silence even with
+ * `continuous = true`, so a session that is meant to keep listening has to be
+ * restarted from `onend`. Without that, the mic appears to switch itself off
+ * moments after being switched on.
+ */
+export function useDictation(locale: string, onTranscript: (text: string) => void) {
   const supported = useSyncExternalStore(
     neverChanges,
     () => recognitionCtor() !== null,
@@ -63,29 +75,37 @@ export function useDictation(locale: string, onFinal: (text: string) => void) {
   );
 
   const [listening, setListening] = useState(false);
-  const [transcript, setTranscript] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  const ref = useRef<SpeechRecognitionLike | null>(null);
-  const finalRef = useRef(onFinal);
+  const recRef = useRef<SpeechRecognitionLike | null>(null);
+  const emitRef = useRef(onTranscript);
+  /** Whether the user still wants to be listening — drives auto-restart. */
+  const wantRef = useRef(false);
+  /** Text already in the box when dictation started; speech appends to it. */
+  const baseRef = useRef("");
+  /** Everything finalised so far this session, across restarts. */
+  const settledRef = useRef("");
+  /** Guards against a restart loop when the mic yields nothing at all. */
+  const emptyRestartsRef = useRef(0);
 
-  // Keep the callback current without re-creating the recogniser.
   useEffect(() => {
-    finalRef.current = onFinal;
-  }, [onFinal]);
+    emitRef.current = onTranscript;
+  }, [onTranscript]);
+
+  const emit = useCallback((extra: string) => {
+    const parts = [baseRef.current.trim(), (settledRef.current + extra).trim()];
+    emitRef.current(parts.filter(Boolean).join(" "));
+  }, []);
 
   const stop = useCallback(() => {
-    ref.current?.stop();
+    wantRef.current = false;
+    recRef.current?.stop();
     setListening(false);
   }, []);
 
-  const start = useCallback(() => {
+  const begin = useCallback(() => {
     const Ctor = recognitionCtor();
     if (!Ctor) return;
-
-    ref.current?.abort();
-    setError(null);
-    setTranscript("");
 
     const rec = new Ctor();
     rec.lang = locale;
@@ -93,47 +113,96 @@ export function useDictation(locale: string, onFinal: (text: string) => void) {
     rec.interimResults = true;
     rec.maxAlternatives = 1;
 
-    let settled = "";
+    // Only trust the engine's own start event — rec.start() resolves later,
+    // and the permission prompt can sit in front of it for a while.
+    rec.onstart = () => {
+      setListening(true);
+      setError(null);
+    };
 
     rec.onresult = (e) => {
       let interim = "";
       for (let i = e.resultIndex; i < e.results.length; i += 1) {
         const chunk = e.results[i][0].transcript;
-        if (e.results[i].isFinal) settled += chunk;
+        if (e.results[i].isFinal) settledRef.current += chunk;
         else interim += chunk;
       }
-      setTranscript((settled + interim).trim());
+      emptyRestartsRef.current = 0;
+      emit(interim);
     };
 
     rec.onerror = (e) => {
+      // Silence and self-inflicted aborts are normal punctuation in a long
+      // dictation, not failures — the restart in onend handles them.
+      if (e.error === "no-speech" || e.error === "aborted") return;
+
+      wantRef.current = false;
       setError(
-        e.error === "not-allowed"
-          ? "Microphone access was blocked. Allow it in your browser's site settings."
-          : e.error === "no-speech"
-            ? "I didn't catch anything — try again."
-            : `Speech recognition failed (${e.error}).`,
+        e.error === "not-allowed" || e.error === "service-not-allowed"
+          ? "Microphone access is blocked. Allow it for this site in your browser settings, then try again."
+          : e.error === "audio-capture"
+            ? "No microphone was found. Check that one is connected and enabled."
+            : e.error === "network"
+              ? "Speech recognition needs a network connection and could not reach the service."
+              : `Speech recognition failed (${e.error}).`,
       );
       setListening(false);
     };
 
     rec.onend = () => {
-      setListening(false);
-      const text = settled.trim();
-      if (text) finalRef.current(text);
+      if (!wantRef.current) {
+        setListening(false);
+        return;
+      }
+      // Chrome's idle timeout. Pick the session back up.
+      emptyRestartsRef.current += 1;
+      if (emptyRestartsRef.current > 4) {
+        wantRef.current = false;
+        setListening(false);
+        setError("I didn't catch anything. Check the microphone and try again.");
+        return;
+      }
+      try {
+        rec.start();
+      } catch {
+        wantRef.current = false;
+        setListening(false);
+      }
     };
 
-    ref.current = rec;
+    recRef.current = rec;
     try {
       rec.start();
-      setListening(true);
     } catch {
-      setError("Could not start the microphone.");
+      wantRef.current = false;
+      setListening(false);
+      setError("Could not start the microphone. Close anything else using it and try again.");
     }
-  }, [locale]);
+  }, [locale, emit]);
 
-  useEffect(() => () => ref.current?.abort(), []);
+  /** `base` is the text already typed; dictation is appended to it. */
+  const start = useCallback(
+    (base = "") => {
+      recRef.current?.abort();
+      setError(null);
+      baseRef.current = base;
+      settledRef.current = "";
+      emptyRestartsRef.current = 0;
+      wantRef.current = true;
+      begin();
+    },
+    [begin],
+  );
 
-  return { supported, listening, transcript, error, start, stop };
+  useEffect(
+    () => () => {
+      wantRef.current = false;
+      recRef.current?.abort();
+    },
+    [],
+  );
+
+  return { supported, listening, error, start, stop };
 }
 
 /**
