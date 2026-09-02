@@ -4,7 +4,25 @@
 
 An AI legal counsel web app for **Cameroon**, **Mozambique** and the **CEMAC region**, answering in English, French or Portuguese.
 
-Every substantive answer comes back in a fixed structure: Short Answer → Legal Basis → Procedural Steps → Risks & Considerations → Recommended Action → Templates.
+Five kinds of work, chosen from the sidebar:
+
+| Task | What you get |
+| --- | --- |
+| **Consultation** | Short Answer → Legal Basis → Procedural Steps → Risks → Recommended Action → Templates |
+| **Review & redline** | Attach a contract. Clause-by-clause: risk level, the issue, the original text quoted, proposed replacement with ~~deletions~~ and **insertions** marked, and the legal basis. Then missing provisions and a negotiating position. |
+| **Draft** | A contract, clause, letter, notice or resolution in the jurisdiction's conventions, with placeholders and drafting notes. |
+| **Legal opinion** | Question presented → short answer → facts assumed → analysis → conclusion → qualifications. |
+| **Filing / submission** | The document to lodge, an **annex of every provision relied on**, and the procedure — where, fees, deadlines, attachments. |
+
+Any answer can be opened in Word with one click. Documents go in as PDF, Word or text, up to 4 MB.
+
+### Long documents on small budgets
+
+Free tiers cap tokens per minute well below a model's context window — Groq's 70B model allows roughly 12k tokens a minute against a 128k window. A 30-page contract does not fit. So each provider carries a `requestBudget`, and a document that exceeds it is read in parts: each part is analysed against the task, then a final pass synthesises the notes into the deliverable. Progress is streamed ("Reading contract.pdf, part 3 of 7…"), rate limits are retried with back-off, and parts are cut at clause boundaries with overlap so nothing is read half. Set `AI_BUDGET_TOKENS` to raise the budget on a paid tier.
+
+### Web search on any model
+
+Searching used to depend on the model being able to search. Now it doesn't: set a free `TAVILY_API_KEY` (or `BRAVE_SEARCH_API_KEY`) and every model gets grounded answers — the app asks the model what to search for, runs the searches, floats official sources (gazettes, regulators, courts) to the top, hands the results in as numbered context, and shows them as source chips. Models that search natively (Groq compound, Perplexity) still do so themselves.
 
 ## Stack
 

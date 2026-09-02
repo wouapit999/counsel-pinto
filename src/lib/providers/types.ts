@@ -57,6 +57,13 @@ export type ProviderSpec = {
   /** Does it accept OpenAI's `reasoning_effort`? */
   supportsReasoningEffort: boolean;
   baseUrl: string;
+  /**
+   * Practical per-request input budget in tokens. Not the model's context
+   * window — the free tier's tokens-per-minute cap usually binds first, and
+   * blowing it mid-review returns a 429 rather than an answer. Overridable
+   * with AI_BUDGET_TOKENS.
+   */
+  requestBudget: number;
 };
 
 export type ResolvedProvider = ProviderSpec & {
@@ -78,4 +85,9 @@ export type ProviderStatus = {
   envKey: string;
   /** Providers with a key present, so the UI can say what else is available. */
   configured: ProviderId[];
+  /**
+   * How answers can reach the web. `native` = the model searches itself;
+   * `tavily`/`brave` = we search and hand results in; null = no web access.
+   */
+  search: { mode: "native" | "tavily" | "brave" | null; label: string };
 };

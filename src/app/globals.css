@@ -163,6 +163,28 @@ body {
   font-weight: 600;
 }
 
+/* Redlines: deletions struck through in red, insertions bold in green. */
+.legal-prose del {
+  color: #b42318;
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  background: rgba(180, 35, 24, 0.08);
+  border-radius: 2px;
+  padding: 0 0.15em;
+}
+.legal-prose blockquote strong {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-radius: 2px;
+  padding: 0 0.15em;
+}
+@media (prefers-color-scheme: dark) {
+  .legal-prose del {
+    color: #f97066;
+    background: rgba(249, 112, 102, 0.12);
+  }
+}
+
 /* ---- Counsel Bot ---- */
 @keyframes bot-float {
   0%,

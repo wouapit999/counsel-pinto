@@ -199,14 +199,27 @@ const JURISDICTION_DIRECTIVE: Record<JurisdictionId, string> = {
  * The persona stays first and byte-stable so the provider's implicit prompt
  * cache keeps hitting; the per-session directives are appended after it.
  */
-const NO_SEARCH_DIRECTIVE = `**No web access this session.** The "Sources" section above does not apply: you have no search tool right now. Never imply you looked something up, never produce a URL, and never present a figure as current. Answer from what you know, and where the answer depends on a current amount, deadline or the status of an instrument, say plainly that it must be verified and name the official source to check — the ministry, registry or regulator by name. An answer that says "as at my knowledge, X — confirm against Y" is correct here. One that quietly states a figure as though it were checked is not.`;
+/**
+ * How the model gets at the web this session:
+ * - native: the provider runs searches itself (Groq compound, Perplexity)
+ * - provided: we searched and pasted the results into the request
+ * - none: no web access at all
+ */
+export type SearchMode = "native" | "provided" | "none";
 
-const SEARCH_DIRECTIVE = `**Web search is available this session.** Use it as described under "Sources".`;
+const SEARCH_DIRECTIVE: Record<SearchMode, string> = {
+  native: `**Web search is available this session.** Use it as described under "Sources".`,
+
+  provided: `**Sources have been retrieved for you this session.** A "Retrieved sources" block in the user's message lists numbered web results found just now. Treat them as your search results: cite them by number, e.g. [2], wherever you rely on them. You cannot run further searches — if the retrieved sources do not cover a point, say so and name the official source to check, rather than filling the gap from memory. Never cite a number that is not in the list.`,
+
+  none: `**No web access this session.** The "Sources" section above does not apply: you have no search tool right now. Never imply you looked something up, never produce a URL, and never present a figure as current. Answer from what you know, and where the answer depends on a current amount, deadline or the status of an instrument, say plainly that it must be verified and name the official source to check — the ministry, registry or regulator by name. An answer that says "as at my knowledge, X — confirm against Y" is correct here. One that quietly states a figure as though it were checked is not.`,
+};
 
 export function buildSystem(opts: {
   jurisdiction: JurisdictionId;
   language: LanguageId;
-  canSearch: boolean;
+  search: SearchMode;
+  task?: TaskId;
 }): string {
   return [
     BASE_PERSONA,
@@ -217,7 +230,9 @@ export function buildSystem(opts: {
     ``,
     `**Language.** ${LANGUAGE_DIRECTIVE[opts.language]}`,
     ``,
-    opts.canSearch ? SEARCH_DIRECTIVE : NO_SEARCH_DIRECTIVE,
+    SEARCH_DIRECTIVE[opts.search],
+    ``,
+    TASK_DIRECTIVE[opts.task ?? "consult"],
   ].join("\n");
 }
 
@@ -268,3 +283,154 @@ export const SUGGESTIONS: Suggestion[] = [
       "Set out the customer due diligence and beneficial ownership obligations that COBAC and the GABAC framework impose on a CEMAC bank onboarding a corporate client, and the consequences of non-compliance.",
   },
 ];
+
+/* ------------------------------------------------------------------------ */
+/* Legal task modes                                                          */
+/* ------------------------------------------------------------------------ */
+
+export const TASKS = [
+  {
+    id: "consult",
+    label: "Consultation",
+    short: "Consult",
+    blurb: "Ask a question; get the position, its basis and next steps.",
+    wantsDocument: false,
+    placeholder: "Describe the facts and your question",
+  },
+  {
+    id: "review",
+    label: "Review & redline",
+    short: "Redline",
+    blurb: "Clause-by-clause risk review of a contract, with replacement wording.",
+    wantsDocument: true,
+    placeholder: "Attach the contract, then say which party you act for and what worries you",
+  },
+  {
+    id: "draft",
+    label: "Draft",
+    short: "Draft",
+    blurb: "A contract, clause, letter or resolution, ready to edit.",
+    wantsDocument: false,
+    placeholder: "Describe what you need drafted — parties, purpose, key terms",
+  },
+  {
+    id: "opinion",
+    label: "Legal opinion",
+    short: "Opinion",
+    blurb: "A reasoned memo on a question of law, with authorities.",
+    wantsDocument: false,
+    placeholder: "State the question and the facts the opinion should assume",
+  },
+  {
+    id: "filing",
+    label: "Filing / submission",
+    short: "Filing",
+    blurb: "A submission to a court, registry or regulator, with an annex of provisions relied on.",
+    wantsDocument: false,
+    placeholder: "Say what is being filed, where, and the facts it must set out",
+  },
+] as const;
+
+export type TaskId = (typeof TASKS)[number]["id"];
+
+/** Appended to the system prompt. Each one changes what a good answer looks like. */
+export const TASK_DIRECTIVE: Record<TaskId, string> = {
+  consult: `## Task: consultation
+
+Answer in the structure described under "Answer format", scaled to the question.`,
+
+  review: `## Task: contract review and redline
+
+You are reviewing a contract for the party the user identifies. If they have not said which party they act for, ask — it changes every recommendation — unless the document makes it obvious.
+
+Work clause by clause. Output, in this order:
+
+### 1. Summary
+Three to six sentences: what the document is, who it favours, the three issues that matter most, and whether you would sign it as it stands.
+
+### 2. Clause-by-clause review
+For every clause that needs attention — skip the ones that are fine, but list at the end which you passed:
+
+#### [Clause number] — [Heading]
+**Risk:** High / Medium / Low
+**Issue:** what is wrong and why it matters for this party. Two or three sentences.
+**Original:**
+> the clause text, quoted exactly as written
+**Proposed:**
+> the replacement wording. Mark deleted words with ~~strikethrough~~ and inserted words in **bold**, so the edit can be seen at a glance.
+**Basis:** the statute, Uniform Act, code or principle that drives the change, cited by article.
+
+### 3. Missing provisions
+Clauses this contract should contain and does not, each with proposed wording.
+
+### 4. Negotiating position
+What to insist on, what to trade, what to concede.
+
+Never paraphrase the original — quote it. Never propose wording you would not be prepared to defend. If a clause is void or unenforceable under the governing law, say so and cite why.`,
+
+  draft: `## Task: drafting
+
+Produce the document the user asks for — contract, clause, letter, notice, board resolution, power of attorney — ready to use once the placeholders are filled.
+
+- Ask first only if a fact is genuinely essential and unknown, such as the parties, governing law or term. Otherwise draft, and mark unknowns as [SQUARE-BRACKET PLACEHOLDERS].
+- Use the drafting conventions of the jurisdiction and language: numbered articles, definitions up front, the formal register French and Portuguese legal documents expect.
+- Respect mandatory rules of the governing law. A clause that contradicts an OHADA Uniform Act or a mandatory provision of the Labour Code is worse than no clause. Where you have shaped a provision to satisfy a mandatory rule, say so in the notes.
+- After the document, add **Drafting notes**: the choices you made, provisions the user should consider adding, and anything needing local-counsel sign-off — notarisation, registration, stamp duty, translation.`,
+
+  opinion: `## Task: legal opinion
+
+Write a reasoned opinion in the form a practitioner would send to a client or a board:
+
+1. **Question presented** — one or two sentences.
+2. **Short answer** — the conclusion and how confident you are in it.
+3. **Facts assumed** — listed. The opinion stands or falls on them.
+4. **Analysis** — the applicable law applied to the facts, authority by authority. Where the law is unsettled, give both readings and say which you prefer and why.
+5. **Conclusion and recommendations.**
+6. **Qualifications** — what the opinion does not cover, what must be verified locally, and the official source to check.
+
+Cite every instrument by name and article. Summarise provisions; do not reproduce them.`,
+
+  filing: `## Task: filing or submission
+
+Produce the document to be lodged — application, petition, statement of claim, defence, regulatory notification, registry cover letter — in the form and register the receiving body expects, with the party details, the facts, the relief or outcome sought, and the grounds.
+
+Then add a separate section headed **Annex — provisions relied on**: every statute, Uniform Act, regulation, decree or rule the filing depends on, giving the instrument, the article, a one-line summary of what it provides, and why it matters here. This annex is what the user attaches or cross-checks, so keep it complete and do not pad it.
+
+Finish with **Procedure**: where it is filed, fees or stamp duty, deadlines, what to attach, and what happens next. If you are not certain of a deadline or a fee, say so rather than guess.`,
+};
+
+/** How an attached document is introduced to the model. */
+export function frameDocument(
+  name: string,
+  text: string,
+  part?: { index: number; total: number },
+) {
+  const label =
+    part && part.total > 1 ? `${name} — part ${part.index + 1} of ${part.total}` : name;
+  return `<document name="${name.replace(/"/g, "'")}">\n### ${label}\n\n${text}\n</document>`;
+}
+
+/**
+ * Map phase for documents too long to read in one request: what to extract
+ * from each part. Deliberately narrow — the synthesis step does the thinking.
+ */
+export const CHUNK_DIRECTIVE: Record<TaskId, string> = {
+  review: `You are reading one part of a longer contract. Review only the clauses in this part, using the clause-by-clause format (Risk / Issue / Original / Proposed / Basis). Do not write a summary, a missing-provisions section or a negotiating position — those come after every part has been read. If this part begins or ends mid-clause, say so in one line.`,
+  consult: `You are reading one part of a longer document. Extract every fact, defined term, obligation, date, amount and party in this part that bears on the user's request, as concise bullet notes with the clause or page reference. Do not answer the request yet.`,
+  draft: `You are reading one part of a longer reference document. Note every term, definition, obligation or structural choice in this part that the new draft should mirror, replace or avoid, as concise bullet notes with the clause reference. Do not draft yet.`,
+  opinion: `You are reading one part of a longer document. Extract every fact, provision, date, amount and party in this part that bears on the question of law, as concise bullet notes with the clause or page reference. Do not give the opinion yet.`,
+  filing: `You are reading one part of a longer document. Extract every fact, party detail, date, amount and provision in this part that the filing must set out or rely on, as concise bullet notes with the reference. Do not draft the filing yet.`,
+};
+
+/** Reduce phase: turn the per-part notes into the final deliverable. */
+export function synthesisDirective(task: TaskId, parts: number): string {
+  const what: Record<TaskId, string> = {
+    review:
+      "Now produce the complete review — Summary, the consolidated Clause-by-clause section (merge the per-part reviews, remove duplicates from overlapping parts, keep clause order), Missing provisions, and Negotiating position.",
+    consult: "Now answer the user's request in full, in the usual structure.",
+    draft: "Now produce the draft in full, followed by Drafting notes.",
+    opinion: "Now write the opinion in full, in the six-part structure.",
+    filing: "Now produce the filing, the Annex of provisions relied on, and the Procedure section.",
+  };
+  return `The document was read in ${parts} parts; the notes from each part follow. Work from the notes — do not ask to see the document again. Where notes from adjacent parts overlap or conflict, prefer the later part. ${what[task]}`;
+}

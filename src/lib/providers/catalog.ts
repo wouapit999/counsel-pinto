@@ -27,6 +27,8 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     supportsSearch: false,
     supportsReasoningEffort: false,
     baseUrl: "https://api.groq.com/openai/v1",
+    // Free tier is ~12k tokens/minute on the 70B model; the window is 128k.
+    requestBudget: 9000,
   },
   cerebras: {
     id: "cerebras",
@@ -40,6 +42,7 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     supportsSearch: false,
     supportsReasoningEffort: false,
     baseUrl: "https://api.cerebras.ai/v1",
+    requestBudget: 24000,
   },
   mistral: {
     id: "mistral",
@@ -53,6 +56,7 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     supportsSearch: false,
     supportsReasoningEffort: false,
     baseUrl: "https://api.mistral.ai/v1",
+    requestBudget: 30000,
   },
   openrouter: {
     id: "openrouter",
@@ -69,6 +73,8 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     supportsSearch: false,
     supportsReasoningEffort: false,
     baseUrl: "https://openrouter.ai/api/v1",
+    // ":free" models vary widely; assume the tighter end.
+    requestBudget: 12000,
   },
   github: {
     id: "github",
@@ -82,6 +88,8 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     supportsSearch: false,
     supportsReasoningEffort: false,
     baseUrl: "https://models.github.ai/inference",
+    // GitHub Models caps input around 8k on the free tier.
+    requestBudget: 7000,
   },
   perplexity: {
     id: "perplexity",
@@ -95,6 +103,7 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     supportsSearch: true,
     supportsReasoningEffort: true,
     baseUrl: "https://api.perplexity.ai",
+    requestBudget: 60000,
   },
 };
 

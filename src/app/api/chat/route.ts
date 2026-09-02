@@ -1,16 +1,17 @@
 import { NextRequest } from "next/server";
 import {
-  buildSystem,
+  TASKS,
   type EffortId,
   type JurisdictionId,
   type LanguageId,
+  type TaskId,
 } from "@/lib/counsel";
+import { runPipeline, type AttachedDocument } from "@/lib/pipeline";
 import {
   DEFAULT_PROVIDER,
   PROVIDERS,
   describeError,
   resolveProvider,
-  streamCompletion,
   type Turn,
 } from "@/lib/providers";
 
@@ -23,11 +24,15 @@ type ChatBody = {
   language: LanguageId;
   effort: EffortId;
   research?: boolean;
+  task?: TaskId;
+  documents?: AttachedDocument[];
 };
 
 function line(obj: unknown) {
   return new TextEncoder().encode(JSON.stringify(obj) + "\n");
 }
+
+const TASK_IDS = new Set<string>(TASKS.map((t) => t.id));
 
 export async function POST(req: NextRequest) {
   const provider = resolveProvider();
@@ -63,52 +68,37 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // Asking for search on a provider that cannot search is not an error — it
-  // just isn't done, and the prompt is told so it won't invent citations.
-  const research = body.research !== false && provider.canSearch;
+  const documents = (body.documents ?? [])
+    .filter((d) => typeof d?.name === "string" && typeof d?.text === "string")
+    .map((d) => ({ name: d.name.slice(0, 200), text: d.text }));
 
-  const system = buildSystem({
-    jurisdiction: body.jurisdiction ?? "auto",
-    language: body.language ?? "auto",
-    canSearch: research,
-  });
+  const task: TaskId = body.task && TASK_IDS.has(body.task) ? body.task : "consult";
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       try {
-        controller.enqueue(
-          line({
-            type: "meta",
-            provider: provider.label,
-            model: provider.model,
-            searched: research,
-          }),
-        );
-
-        const events = streamCompletion(provider, {
-          system,
+        const events = runPipeline({
+          provider,
           turns,
+          documents,
+          task,
+          jurisdiction: body.jurisdiction ?? "auto",
+          language: body.language ?? "auto",
           effort: body.effort ?? "high",
-          research,
+          research: body.research !== false,
           signal: req.signal,
         });
-
-        for await (const event of events) {
-          controller.enqueue(line(event));
-        }
-
+        for await (const event of events) controller.enqueue(line(event));
         controller.enqueue(line({ type: "done" }));
       } catch (err) {
-        if ((err as Error)?.name === "AbortError") {
-          controller.close();
-          return;
+        if ((err as Error)?.name !== "AbortError") {
+          controller.enqueue(
+            line({
+              type: "error",
+              message: describeError(err, provider.model, provider.label),
+            }),
+          );
         }
-        controller.enqueue(
-          line({
-            type: "error",
-            message: describeError(err, provider.model, provider.label),
-          }),
-        );
       } finally {
         controller.close();
       }

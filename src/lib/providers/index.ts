@@ -1,3 +1,4 @@
+import { SEARCH_BACKENDS, searchBackend } from "@/lib/search";
 import { PREFERENCE, PROVIDERS, modelCanSearch } from "./catalog";
 import { openAiCompatAdapter } from "./openaiCompat";
 import type { Adapter, ProviderId, ProviderStatus, ResolvedProvider } from "./types";
@@ -48,9 +49,18 @@ export function resolveProvider(): ResolvedProvider | null {
  */
 export const streamCompletion: Adapter = openAiCompatAdapter;
 
+/** How this deployment can reach the web, given the active model. */
+function searchStatus(active: ResolvedProvider | null): ProviderStatus["search"] {
+  if (active?.canSearch) return { mode: "native", label: `${active.label} searches directly` };
+  const backend = searchBackend();
+  if (backend) return { mode: backend, label: `via ${SEARCH_BACKENDS[backend].label}` };
+  return { mode: null, label: "no web access" };
+}
+
 /** Safe to send to the browser — contains no key material. */
 export function providerStatus(): ProviderStatus {
   const active = resolveProvider();
+  const search = searchStatus(active);
 
   if (!active) {
     const fallback = PROVIDERS[DEFAULT_PROVIDER];
@@ -64,6 +74,7 @@ export function providerStatus(): ProviderStatus {
       console: fallback.console,
       envKey: fallback.envKey,
       configured: [],
+      search,
     };
   }
 
@@ -72,10 +83,12 @@ export function providerStatus(): ProviderStatus {
     id: active.id,
     label: active.label,
     model: active.model,
-    supportsSearch: active.canSearch,
+    // Either the model searches itself or we search for it — both count.
+    supportsSearch: search.mode !== null,
     pricing: active.pricing,
     console: active.console,
     envKey: active.envKey,
     configured: configuredProviders(),
+    search,
   };
 }

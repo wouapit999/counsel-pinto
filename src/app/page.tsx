@@ -21,12 +21,14 @@ import {
   LANGUAGES,
   SPEECH_LOCALE,
   SUGGESTIONS,
+  TASKS,
   VOICE_UI,
   resolveLocale,
   type EffortId,
   type JurisdictionId,
   type LanguageId,
   type Source,
+  type TaskId,
 } from "@/lib/counsel";
 import type { ProviderStatus } from "@/lib/providers/types";
 
@@ -35,6 +37,18 @@ type Turn = {
   role: "user" | "assistant";
   content: string;
   sources?: Source[];
+  /** Names of documents that were attached to this request, for display. */
+  documents?: { name: string; chars: number }[];
+  task?: TaskId;
+};
+
+/** A file the user attached, already reduced to text by /api/extract. */
+type Attachment = {
+  id: string;
+  name: string;
+  text: string;
+  chars: number;
+  pages?: number;
 };
 
 const STORAGE_KEY = "counsel-pinto/session-v2";
@@ -46,6 +60,7 @@ type Persisted = {
   effort: EffortId;
   research: boolean;
   autoSpeak: boolean;
+  task: TaskId;
 };
 
 function newId() {
@@ -81,6 +96,10 @@ export default function Page() {
   const [effort, setEffort] = useState<EffortId>(boot.effort ?? "high");
   const [research, setResearch] = useState(boot.research ?? true);
   const [autoSpeak, setAutoSpeak] = useState(boot.autoSpeak ?? false);
+  const [task, setTask] = useState<TaskId>(boot.task ?? "consult");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [progress, setProgress] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -112,13 +131,14 @@ export default function Page() {
       effort,
       research,
       autoSpeak,
+      task,
     };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     } catch {
       /* quota exceeded — not fatal */
     }
-  }, [hydrated, turns, jurisdiction, language, effort, research, autoSpeak]);
+  }, [hydrated, turns, jurisdiction, language, effort, research, autoSpeak, task]);
 
   // Ask the server which provider is live and what it can do, so the controls
   // reflect reality instead of failing when the user presses them.
@@ -154,19 +174,34 @@ export default function Page() {
 
   const send = useCallback(
     async (text: string) => {
-      const question = text.trim();
-      if (!question || busy) return;
+      const typed = text.trim();
+      if ((!typed && attachments.length === 0) || busy) return;
+
+      // A document with no instruction is still a clear request in most modes.
+      const taskLabel = TASKS.find((t) => t.id === task)!.label.toLowerCase();
+      const question =
+        typed || `Please ${taskLabel === "consultation" ? "review" : taskLabel} the attached document.`;
 
       narration.cancel();
       setError(null);
       setNotice(null);
+      setProgress(null);
       setInput("");
 
-      const userTurn: Turn = { id: newId(), role: "user", content: question };
+      const docs = attachments;
+      setAttachments([]);
+
+      const userTurn: Turn = {
+        id: newId(),
+        role: "user",
+        content: question,
+        task,
+        documents: docs.length ? docs.map((d) => ({ name: d.name, chars: d.chars })) : undefined,
+      };
       const assistantId = newId();
       const history = [...turns, userTurn];
 
-      setTurns([...history, { id: assistantId, role: "assistant", content: "" }]);
+      setTurns([...history, { id: assistantId, role: "assistant", content: "", task }]);
       setBusy(true);
 
       const controller = new AbortController();
@@ -185,6 +220,8 @@ export default function Page() {
             language,
             effort,
             research,
+            task,
+            documents: docs.map((d) => ({ name: d.name, text: d.text })),
           }),
         });
 
@@ -203,7 +240,8 @@ export default function Page() {
           if (!raw.trim()) return;
           const evt = JSON.parse(raw) as
             | { type: "text"; text: string }
-            | { type: "meta"; provider: string; model: string; searched: boolean }
+            | { type: "meta"; provider: string; model: string; search: string; parts: number }
+            | { type: "progress"; text: string; step?: number; total?: number }
             | { type: "searching"; active: boolean }
             | { type: "sources"; sources: Source[] }
             | { type: "notice"; text: string }
@@ -212,11 +250,18 @@ export default function Page() {
 
           if (evt.type === "text") {
             spokenText += evt.text;
+            setProgress(null);
             setTurns((prev) =>
               prev.map((t) =>
                 t.id === assistantId ? { ...t, content: t.content + evt.text } : t,
               ),
             );
+          } else if (evt.type === "progress") {
+            setProgress(evt.text);
+          } else if (evt.type === "meta") {
+            if (evt.parts > 1) {
+              setProgress(`Long document — reading it in ${evt.parts} parts.`);
+            }
           } else if (evt.type === "searching") {
             setSearching(evt.active);
           } else if (evt.type === "sources") {
@@ -250,14 +295,76 @@ export default function Page() {
       } finally {
         setBusy(false);
         setSearching(false);
+        setProgress(null);
         abortRef.current = null;
         setTurns((prev) =>
           prev.filter((t) => !(t.id === assistantId && t.content === "")),
         );
       }
     },
-    [busy, turns, jurisdiction, language, effort, research, autoSpeak, narration],
+    [busy, turns, jurisdiction, language, effort, research, autoSpeak, narration, task, attachments],
   );
+
+  /** Send files to /api/extract and keep the text client-side until sent. */
+  const attach = async (files: FileList | File[]) => {
+    setError(null);
+    setUploading(true);
+    for (const file of Array.from(files)) {
+      const form = new FormData();
+      form.append("file", file);
+      try {
+        const res = await fetch("/api/extract", { method: "POST", body: form });
+        const data = (await res.json()) as {
+          error?: string;
+          name: string;
+          text: string;
+          chars: number;
+          pages?: number;
+          warning?: string;
+        };
+        if (!res.ok) throw new Error(data.error ?? `Could not read ${file.name}.`);
+        setAttachments((prev) => [
+          ...prev,
+          { id: newId(), name: data.name, text: data.text, chars: data.chars, pages: data.pages },
+        ]);
+        if (data.warning) setNotice(data.warning);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : `Could not read ${file.name}.`);
+      }
+    }
+    setUploading(false);
+  };
+
+  /**
+   * Word opens an HTML file saved as .doc and keeps the formatting, which is
+   * enough for a lawyer to take a redline or a draft into their own template.
+   * The rendered markup is lifted straight from the page.
+   */
+  const exportWord = (turn: Turn) => {
+    const el = document.querySelector<HTMLElement>(`[data-turn="${turn.id}"] .legal-prose`);
+    const body = el?.innerHTML ?? `<pre>${turn.content}</pre>`;
+    const html = [
+      '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">',
+      '<head><meta charset="utf-8"><title>Counsel Pinto</title><style>',
+      "body{font-family:Calibri,Arial,sans-serif;font-size:11pt;line-height:1.5;color:#111}",
+      "h1,h2,h3,h4{font-family:Cambria,Georgia,serif;color:#1f4d3d}",
+      "blockquote{margin:6pt 0 6pt 18pt;padding-left:8pt;border-left:2pt solid #999}",
+      "del{color:#b42318} blockquote strong{color:#1f4d3d}",
+      "table{border-collapse:collapse} td,th{border:1pt solid #999;padding:3pt 6pt}",
+      "a{color:#1f4d3d}",
+      "</style></head><body>",
+      body,
+      `<p style="margin-top:24pt;font-size:9pt;color:#666">${DISCLAIMER}<br/>${DEVELOPER.credit}</p>`,
+      "</body></html>",
+    ].join("");
+    const blob = new Blob(["﻿", html], { type: "application/msword" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `counsel-pinto-${turn.task ?? "answer"}-${new Date().toISOString().slice(0, 10)}.doc`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const stop = () => {
     abortRef.current?.abort();
@@ -268,8 +375,10 @@ export default function Page() {
     stop();
     dictation.stop();
     setTurns([]);
+    setAttachments([]);
     setError(null);
     setNotice(null);
+    setProgress(null);
     setInput("");
     textareaRef.current?.focus();
   };
@@ -340,6 +449,8 @@ export default function Page() {
     setLanguage,
     effort,
     setEffort,
+    task,
+    setTask,
     research,
     setResearch,
     autoSpeak,
@@ -414,9 +525,10 @@ export default function Page() {
                           ? narration.cancel()
                           : narration.speak(t.content)
                       }
+                      onExport={() => exportWord(t)}
                     />
                   ))}
-                  {busy && <Working searching={searching} />}
+                  {busy && <Working searching={searching} progress={progress} />}
                 </div>
               )}
 
@@ -444,6 +556,13 @@ export default function Page() {
             jurisdictionLabel={activeJurisdiction.short}
             dictation={dictation}
             copy={copy}
+            task={task}
+            attachments={attachments}
+            uploading={uploading}
+            onAttach={(files) => void attach(files)}
+            onRemoveAttachment={(id) =>
+              setAttachments((prev) => prev.filter((a) => a.id !== id))
+            }
           />
         </main>
       </div>
@@ -575,6 +694,8 @@ function Sidebar({
   setLanguage,
   effort,
   setEffort,
+  task,
+  setTask,
   research,
   setResearch,
   autoSpeak,
@@ -593,6 +714,8 @@ function Sidebar({
   setLanguage: (v: LanguageId) => void;
   effort: EffortId;
   setEffort: (v: EffortId) => void;
+  task: TaskId;
+  setTask: (v: TaskId) => void;
   research: boolean;
   setResearch: (v: boolean) => void;
   autoSpeak: boolean;
@@ -608,6 +731,28 @@ function Sidebar({
   return (
     <aside className={`flex-col overflow-y-auto bg-surface ${className}`}>
       <div className="flex flex-1 flex-col gap-5 p-4">
+        <Field label="Task">
+          <div className="space-y-1">
+            {TASKS.map((t) => (
+              <button
+                key={t.id}
+                title={t.blurb}
+                onClick={() => {
+                  setTask(t.id);
+                  onNavigate?.();
+                }}
+                className={`w-full rounded-lg px-3 py-1.5 text-left text-sm transition ${
+                  task === t.id
+                    ? "bg-accent-soft font-medium text-accent"
+                    : "text-foreground hover:bg-surface-muted"
+                }`}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </Field>
+
         <Field label="Jurisdiction">
           <div className="space-y-1">
             {JURISDICTIONS.map((j) => (
@@ -667,8 +812,12 @@ function Sidebar({
             label="Search the web"
             hint={
               canSearch
-                ? "Check current figures and instruments against official sources, and cite them."
-                : `${status?.label ?? "This provider"} cannot search. Answers come from training data and will say what to verify.`
+                ? `Check current figures and instruments against official sources, and cite them${
+                    status?.search.mode && status.search.mode !== "native"
+                      ? ` — ${status.search.label}`
+                      : ""
+                  }.`
+                : `No web access — ${status?.label ?? "this provider"} cannot search and no search key is set. Answers come from training data and will say what to verify.`
             }
             checked={canSearch && research}
             onChange={setResearch}
@@ -710,7 +859,8 @@ function Sidebar({
                 <>
                   Answering with <span className="text-foreground">{status.label}</span>{" "}
                   <span className="font-mono text-[10px]">{status.model}</span>
-                  {status.supportsSearch ? " · can search" : " · no web access"}
+                  {" · "}
+                  {status.search.mode ? `web search ${status.search.label}` : "no web access"}
                 </>
               ) : (
                 <>No AI provider configured.</>
@@ -857,16 +1007,31 @@ function Message({
   canSpeak,
   speaking,
   onSpeak,
+  onExport,
 }: {
   turn: Turn;
   botState: BotState;
   canSpeak: boolean;
   speaking: boolean;
   onSpeak: () => void;
+  onExport: () => void;
 }) {
   if (turn.role === "user") {
     return (
-      <div className="flex justify-end">
+      <div className="flex flex-col items-end gap-1.5">
+        {turn.documents && turn.documents.length > 0 && (
+          <div className="flex max-w-[85%] flex-wrap justify-end gap-1.5">
+            {turn.documents.map((d) => (
+              <span
+                key={d.name}
+                className="inline-flex items-center gap-1.5 rounded-full border border-line bg-surface px-2.5 py-1 text-[11px] text-muted"
+              >
+                <PaperclipIcon size={12} />
+                <span className="max-w-[220px] truncate">{d.name}</span>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-accent px-4 py-2.5 text-[0.9375rem] leading-relaxed text-accent-contrast">
           {turn.content}
         </div>
@@ -874,18 +1039,36 @@ function Message({
     );
   }
 
+  const taskLabel = turn.task ? TASKS.find((t) => t.id === turn.task)?.short : undefined;
+
   return (
-    <article>
+    <article data-turn={turn.id}>
       <div className="mb-2 flex items-center gap-2">
         <CounselBot state={botState} size={26} />
         <span className="text-xs font-medium text-muted">Counsel Pinto</span>
-        {canSpeak && turn.content && (
-          <button
-            onClick={onSpeak}
-            className="ml-auto rounded-md px-2 py-1 text-[11px] font-medium text-muted transition hover:bg-surface-muted hover:text-accent"
-          >
-            {speaking ? "■ Stop" : "▶ Listen"}
-          </button>
+        {taskLabel && taskLabel !== "Consult" && (
+          <span className="rounded-full bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent">
+            {taskLabel}
+          </span>
+        )}
+        {turn.content && (
+          <div className="ml-auto flex items-center gap-1">
+            <button
+              onClick={onExport}
+              title="Open in Word"
+              className="rounded-md px-2 py-1 text-[11px] font-medium text-muted transition hover:bg-surface-muted hover:text-accent"
+            >
+              ⤓ Word
+            </button>
+            {canSpeak && (
+              <button
+                onClick={onSpeak}
+                className="rounded-md px-2 py-1 text-[11px] font-medium text-muted transition hover:bg-surface-muted hover:text-accent"
+              >
+                {speaking ? "■ Stop" : "▶ Listen"}
+              </button>
+            )}
+          </div>
         )}
       </div>
       <div className="legal-prose rounded-2xl border border-line bg-surface px-4 py-4 sm:px-5">
@@ -898,7 +1081,13 @@ function Message({
   );
 }
 
-function Working({ searching }: { searching: boolean }) {
+function Working({
+  searching,
+  progress,
+}: {
+  searching: boolean;
+  progress: string | null;
+}) {
   return (
     <div className="flex items-center gap-2 pl-1 text-sm text-muted">
       <span className="flex gap-1">
@@ -910,8 +1099,25 @@ function Working({ searching }: { searching: boolean }) {
           />
         ))}
       </span>
-      {searching ? "Checking official sources…" : "Researching the position…"}
+      {progress ?? (searching ? "Checking official sources…" : "Researching the position…")}
     </div>
+  );
+}
+
+function PaperclipIcon({ size = 17 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
   );
 }
 
@@ -964,6 +1170,11 @@ function Composer({
   jurisdictionLabel,
   dictation,
   copy,
+  task,
+  attachments,
+  uploading,
+  onAttach,
+  onRemoveAttachment,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -975,13 +1186,23 @@ function Composer({
   jurisdictionLabel: string;
   dictation: ReturnType<typeof useDictation>;
   copy: (typeof VOICE_UI)["en"];
+  task: TaskId;
+  attachments: Attachment[];
+  uploading: boolean;
+  onAttach: (files: FileList) => void;
+  onRemoveAttachment: (id: string) => void;
 }) {
+  const fileRef = useRef<HTMLInputElement>(null);
+  const activeTask = TASKS.find((t) => t.id === task)!;
+
   useEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
     el.style.height = `${Math.min(el.scrollHeight, 220)}px`;
   }, [value, textareaRef]);
+
+  const canSend = value.trim().length > 0 || attachments.length > 0;
 
   return (
     <div className="shrink-0 border-t border-line bg-surface">
@@ -1002,6 +1223,41 @@ function Composer({
             {copy.listening} Tap the mic again when you have finished.
           </div>
         )}
+        {(attachments.length > 0 || uploading) && (
+          <div className="mb-2 flex flex-wrap gap-1.5 px-1">
+            {attachments.map((a) => (
+              <span
+                key={a.id}
+                className="inline-flex items-center gap-1.5 rounded-full border border-line bg-background py-1 pl-2.5 pr-1 text-[11px]"
+              >
+                <PaperclipIcon size={12} />
+                <span className="max-w-[200px] truncate">{a.name}</span>
+                <span className="text-muted">
+                  {a.pages ? `${a.pages} pp · ` : ""}
+                  {Math.round(a.chars / 1000)}k chars
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onRemoveAttachment(a.id)}
+                  aria-label={`Remove ${a.name}`}
+                  className="ml-0.5 rounded-full px-1.5 text-muted hover:bg-surface-muted hover:text-foreground"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            {uploading && (
+              <span className="inline-flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted">
+                Reading document…
+              </span>
+            )}
+          </div>
+        )}
+        {activeTask.wantsDocument && attachments.length === 0 && !uploading && (
+          <p className="mb-2 px-1 text-[12px] text-muted">
+            Attach the contract to review — PDF, Word or text, up to 4 MB.
+          </p>
+        )}
         <div
           className={`flex items-end gap-2 rounded-2xl border bg-background p-2 transition ${
             dictation.listening
@@ -1009,6 +1265,27 @@ function Composer({
               : "border-line focus-within:border-accent"
           }`}
         >
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+            multiple
+            hidden
+            onChange={(e) => {
+              if (e.target.files?.length) onAttach(e.target.files);
+              e.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            disabled={busy || uploading}
+            aria-label="Attach a document"
+            title="Attach a contract or document (PDF, Word, text)"
+            className="shrink-0 rounded-xl p-2.5 text-muted transition hover:bg-surface-muted hover:text-accent disabled:opacity-40"
+          >
+            <PaperclipIcon />
+          </button>
           {dictation.supported && (
             <button
               type="button"
@@ -1036,7 +1313,7 @@ function Composer({
             placeholder={
               dictation.listening
                 ? copy.listening
-                : `Describe the facts and your question — ${jurisdictionLabel}…`
+                : `${activeTask.placeholder} — ${jurisdictionLabel}…`
             }
             className="max-h-[220px] flex-1 resize-none bg-transparent px-2 py-1.5 text-[0.9375rem] leading-relaxed outline-none placeholder:text-muted"
           />
@@ -1051,10 +1328,10 @@ function Composer({
           ) : (
             <button
               onClick={onSubmit}
-              disabled={!value.trim()}
+              disabled={!canSend || uploading}
               className="shrink-0 rounded-xl bg-accent px-3.5 py-2 text-sm font-medium text-accent-contrast transition disabled:cursor-not-allowed disabled:opacity-35"
             >
-              Ask
+              {task === "consult" ? "Ask" : activeTask.short}
             </button>
           )}
         </div>
