@@ -64,7 +64,7 @@ Every key you set joins a chain, in the order above. A request goes to the first
 
 Two details make this safe rather than merely persistent. Long documents are chunked to the **smallest** budget in the chain, so a part sized for Groq still fits Cerebras if that is who ends up reading it. And once an answer has started streaming it is never handed to another provider — you would see two half-answers — so failover only happens before the first word.
 
-When a provider rejects the configured model ID (they get retired — Groq dropped `llama-3.3-70b-versatile` in August 2026), the app asks that provider for its current model list and puts the first few IDs in the notice, so the fix is a one-line environment change rather than a search.
+When a provider rejects the configured model ID — they get retired without notice; Groq dropped `llama-3.3-70b-versatile` and SambaNova dropped `DeepSeek-V3-0324` within weeks of each other — the app asks that provider for its current list, picks the best available by a preference order (DeepSeek and the large Llama/GPT-OSS/Qwen families first; embeddings, guards and vision models never), retries immediately with it, remembers the choice for later requests, and tells you what it chose. You only set a `*_MODEL` variable when you want to pin one.
 
 **Free DeepSeek**: DeepSeek's own API needs a top-up. SambaNova serves DeepSeek V3 on its free tier, and OpenRouter has `:free` DeepSeek variants — set `OPENROUTER_MODEL` to one.
 

@@ -1,12 +1,23 @@
 import { SEARCH_BACKENDS, searchBackend } from "@/lib/search";
 import { PREFERENCE, PROVIDERS, modelCanSearch } from "./catalog";
-import { listModels, openAiCompatAdapter } from "./openaiCompat";
+import { chooseModel, listModels, openAiCompatAdapter } from "./openaiCompat";
 import type { Adapter, ProviderId, ProviderStatus, ResolvedProvider } from "./types";
 
 export * from "./types";
 export { PROVIDERS, PREFERENCE, modelCanSearch } from "./catalog";
 export { describeError } from "./util";
-export { listModels };
+export { listModels, chooseModel };
+
+/**
+ * Models discovered at runtime after the configured one was rejected. Kept
+ * for the life of the instance so later requests skip the 404 round-trip.
+ * An explicit env override always wins over a remembered discovery.
+ */
+const discovered = new Map<ProviderId, string>();
+
+export function rememberModel(id: ProviderId, model: string) {
+  discovered.set(id, model);
+}
 
 /** The provider suggested when nothing is configured yet. */
 export const DEFAULT_PROVIDER: ProviderId = "groq";
@@ -35,7 +46,8 @@ function resolve(id: ProviderId): ResolvedProvider | null {
   const apiKey = keyFor(id);
   if (!apiKey) return null;
   const spec = PROVIDERS[id];
-  const model = process.env[spec.envModel]?.trim() || spec.defaultModel;
+  const model =
+    process.env[spec.envModel]?.trim() || discovered.get(id) || spec.defaultModel;
   return { ...spec, apiKey, model, canSearch: modelCanSearch(spec, model) };
 }
 

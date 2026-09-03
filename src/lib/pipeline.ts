@@ -11,9 +11,12 @@ import {
   type TaskId,
 } from "@/lib/counsel";
 import {
+  chooseModel,
   describeError,
   listModels,
   markExhausted,
+  modelCanSearch,
+  rememberModel,
   streamCompletion,
   type ResolvedProvider,
   type StreamEvent,
@@ -178,12 +181,18 @@ export async function* withFailover<T>(
   // should read as one failure, not three.
   const failures = new Map<string, string>();
 
+  /** Providers whose model was swapped once already this request. */
+  const substituted = new Set<string>();
+
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
     let sawRateLimit = false;
     let waitHint = 0;
 
-    for (const p of providers) {
-      if (skipped.has(p.id)) continue;
+    // A queue rather than a plain loop, so a provider whose model ID was
+    // rejected can be put straight back at the front with a working one.
+    const queue = providers.filter((p) => !skipped.has(p.id));
+    while (queue.length > 0) {
+      const p = queue.shift()!;
       try {
         return yield* attempt(p);
       } catch (err) {
@@ -197,26 +206,40 @@ export async function* withFailover<T>(
           sawRateLimit = true;
           waitHint = Math.max(waitHint, retryAfterOf(err));
           markExhausted(p.id, Math.max(COOLDOWN_MS, retryAfterOf(err)));
-          const next = providers.some((q) => q !== p && !skipped.has(q.id));
           yield {
             type: "progress",
-            text: next
-              ? `${p.label} hit its free-tier limit while ${label} — switching provider.`
-              : `${p.label} hit its free-tier limit while ${label}.`,
+            text:
+              queue.length > 0
+                ? `${p.label} hit its free-tier limit while ${label} — switching provider.`
+                : `${p.label} hit its free-tier limit while ${label}.`,
           };
           continue;
         }
 
-        skipped.add(p.id);
         if (kind === "model") {
+          // Model IDs get retired without notice. Ask the provider what it
+          // has now, pick the best fit, and try again at once.
           const ids = await listModels(p).catch(() => [] as string[]);
+          const pick = substituted.has(p.id) ? null : chooseModel(ids, p.model);
+          if (pick) {
+            substituted.add(p.id);
+            rememberModel(p.id, pick);
+            yield {
+              type: "notice",
+              text: `${p.label} no longer offers "${p.model}" — using "${pick}" instead. Set ${p.envModel}=${pick} to make that permanent.`,
+            };
+            queue.unshift({ ...p, model: pick, canSearch: modelCanSearch(p, pick) });
+            continue;
+          }
           yield {
             type: "notice",
             text: ids.length
-              ? `${p.label} does not offer "${p.model}". Set ${p.envModel} to one of: ${ids.slice(0, 8).join(", ")}${ids.length > 8 ? ", …" : ""}.`
+              ? `${p.label} does not offer "${p.model}" and nothing suitable was found among: ${ids.slice(0, 8).join(", ")}${ids.length > 8 ? ", …" : ""}. Set ${p.envModel} explicitly.`
               : `${p.label} does not offer "${p.model}". Set ${p.envModel} to a current model ID.`,
           };
         }
+
+        skipped.add(p.id);
         yield {
           type: "progress",
           text: `${p.label} unavailable (${FAILURE_LABEL[kind]}) — trying the next provider.`,

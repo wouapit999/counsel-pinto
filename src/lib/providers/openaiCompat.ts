@@ -178,8 +178,45 @@ export const openAiCompatAdapter: Adapter = async function* (spec, args) {
 };
 
 /**
+ * Which of a provider's models to use when the configured one is gone.
+ * Strongest general-purpose families first; anything that is not a chat
+ * model (embeddings, guards, vision, code, speech) is never chosen.
+ */
+const PREFERRED: RegExp[] = [
+  /deepseek.*v4.*pro/i,
+  /deepseek.*v3\.2/i,
+  /deepseek.*v3\.1/i,
+  /deepseek.*v3(?!.*coder)/i,
+  /deepseek.*chat/i,
+  /gpt-oss-120b/i,
+  /llama.*3\.3.*70b/i,
+  /nemotron.*(ultra|super|70b)/i,
+  /llama.*405b/i,
+  /qwen.*(235b|72b|3\.[5-9])/i,
+  /kimi-k[2-9]/i,
+  /mistral-large/i,
+  /gemma-4/i,
+  /minimax-m[2-9]/i,
+  /llama.*70b/i,
+  /deepseek/i,
+  /llama/i,
+];
+
+const NOT_A_CHAT_MODEL =
+  /embed|guard|safety|moderation|whisper|tts|speech|audio|vision|vlm|-vl-|rerank|coder|codestral|starcoder|codegemma|codellama|diffusion|detector|kosmos|fuyu|deplot|omni|reason2|calibration|robot|synthetic/i;
+
+export function chooseModel(ids: string[], current?: string): string | null {
+  const pool = ids.filter((id) => id !== current && !NOT_A_CHAT_MODEL.test(id));
+  for (const re of PREFERRED) {
+    const hit = pool.find((id) => re.test(id));
+    if (hit) return hit;
+  }
+  return pool[0] ?? null;
+}
+
+/**
  * What this key can actually use. Called when a configured model ID is
- * rejected, so the error can say what to switch to instead of just "no".
+ * rejected, so the chain can switch to something that exists.
  */
 export async function listModels(spec: ResolvedProvider): Promise<string[]> {
   const res = await fetch(`${spec.baseUrl}/models`, {

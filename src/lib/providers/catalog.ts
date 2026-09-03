@@ -41,8 +41,10 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     label: "SambaNova",
     envKey: "SAMBANOVA_API_KEY",
     envModel: "SAMBANOVA_MODEL",
-    // Serves DeepSeek V3 on its free tier — the free way to get DeepSeek.
-    defaultModel: "DeepSeek-V3-0324",
+    // Serves DeepSeek on its free tier — the free way to get DeepSeek.
+    // Verified against /models on 2026-09-03; if it goes, discovery picks
+    // the next DeepSeek automatically.
+    defaultModel: "DeepSeek-V3.2",
     console: "https://cloud.sambanova.ai/apis",
     pricing: "Free tier, no card. Fast.",
     free: true,
@@ -56,7 +58,8 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     label: "NVIDIA NIM",
     envKey: "NVIDIA_API_KEY",
     envModel: "NVIDIA_MODEL",
-    defaultModel: "meta/llama-3.3-70b-instruct",
+    // Verified against /models on 2026-09-03.
+    defaultModel: "deepseek-ai/deepseek-v4-pro-0813",
     console: "https://build.nvidia.com",
     pricing: "Free with an NVIDIA developer account, rate-limited.",
     free: true,
