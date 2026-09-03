@@ -46,12 +46,27 @@ Open http://localhost:3000. If no key is set the app still runs and tells you wh
 
 | Provider | Free? | Web search | Key |
 | --- | --- | --- | --- |
-| **Groq** | Yes, no card | **Yes, on `compound` models** | console.groq.com/keys |
+| **Groq** | Yes, no card | On `compound` models | console.groq.com/keys |
+| **SambaNova** | Yes, no card — serves DeepSeek V3 | No | cloud.sambanova.ai/apis |
+| **NVIDIA NIM** | Yes, with a developer account | No | build.nvidia.com |
 | Cerebras | Yes, no card | No | cloud.cerebras.ai |
 | Mistral | Free experimental tier | No | console.mistral.ai/api-keys |
-| OpenRouter | Only on `:free` models | Only on `:online` models (billed) | openrouter.ai/keys |
+| OpenRouter | Only on `:free` models | Only on `:online` (billed) | openrouter.ai/keys |
 | GitHub Models | Yes, rate-limited | No | github.com/settings/tokens |
 | Perplexity | Paid | Yes | perplexity.ai/settings/api |
+| DeepSeek | Paid, cheap — no free tier | No | platform.deepseek.com |
+
+"No" in the search column stops mattering once a `TAVILY_API_KEY` is set: the app then searches for every model.
+
+### Failover — how "never runs out" works
+
+Every key you set joins a chain, in the order above. A request goes to the first provider; if that one returns a rate limit, the request moves to the next **immediately** and the limited provider sits out for sixty seconds. A rejected key, missing model or empty credit skips that provider for the request. If every provider is limited at the same moment, the app waits twenty seconds and goes round again. The sidebar shows the chain; each answer says which provider produced it.
+
+Two details make this safe rather than merely persistent. Long documents are chunked to the **smallest** budget in the chain, so a part sized for Groq still fits Cerebras if that is who ends up reading it. And once an answer has started streaming it is never handed to another provider — you would see two half-answers — so failover only happens before the first word.
+
+When a provider rejects the configured model ID (they get retired — Groq dropped `llama-3.3-70b-versatile` in August 2026), the app asks that provider for its current model list and puts the first few IDs in the notice, so the fix is a one-line environment change rather than a search.
+
+**Free DeepSeek**: DeepSeek's own API needs a top-up. SambaNova serves DeepSeek V3 on its free tier, and OpenRouter has `:free` DeepSeek variants — set `OPENROUTER_MODEL` to one.
 
 **Groq is the one to use.** The default model is `openai/gpt-oss-120b` — Groq's recommended replacement after `llama-3.3-70b-versatile` was retired from the free tier on 16 August 2026, which is a live example of why every model ID here is overridable. For sourced answers either set a `TAVILY_API_KEY` (works with any model) or set `GROQ_MODEL` to a compound model, which searches natively.
 
@@ -59,9 +74,9 @@ Search capability is a property of the **model**, not the provider — `src/lib/
 
 ### How the provider is chosen
 
-The app uses the first provider it finds a key for, in the order in the table. Set `AI_PROVIDER` to pin one explicitly when several keys are present. Every model ID is overridable — `GROQ_MODEL`, `MISTRAL_MODEL`, and so on — because model IDs are retired regularly; a stale one surfaces as "model not available on X", not a crash.
+The chain order is the table order; `AI_PROVIDER` moves one provider to the front. Every model ID is overridable — `GROQ_MODEL`, `SAMBANOVA_MODEL`, and so on — because model IDs are retired regularly.
 
-All six speak OpenAI's `/chat/completions`, so there is one adapter and no vendor SDK. Citations arrive in three different shapes (Perplexity's `citations` and `search_results`, Groq's `executed_tools`); `openaiCompat.ts` reads all of them and ignores anything it doesn't recognise, because a missing source chip is survivable and an invented one is not.
+All nine speak OpenAI's `/chat/completions`, so there is one adapter and no vendor SDK. Citations arrive in three different shapes (Perplexity's `citations` and `search_results`, Groq's `executed_tools`); `openaiCompat.ts` reads all of them and ignores anything it doesn't recognise, because a missing source chip is survivable and an invented one is not.
 
 ### When a model cannot search
 
@@ -121,13 +136,9 @@ Conversations are stored in the browser's `localStorage` only; nothing is persis
 
 ## Deployment
 
-Hosted on Vercel. Set one provider key — `GROQ_API_KEY` unless you have a reason to differ. Either paste it into the project's Environment Variables page in the dashboard, or:
+Hosted on Vercel under **wouapit999s-projects/counsel-pinto**, deploying automatically from every push to `master` on GitHub. Do not deploy with the Vercel CLI from this machine — its login belongs to a different team and creates an orphan project.
 
-```bash
-vercel env add GROQ_API_KEY production
-```
-
-Redeploy afterwards — environment variables are read at build time. Without a key the app builds and renders, and shows setup guidance instead of failing.
+Set as many provider keys as you have in the project's Environment Variables page — each one extends the failover chain — plus `TAVILY_API_KEY` for search. A push (or a redeploy from the dashboard) picks them up; environment variables are read at build time. Without any key the app builds and renders, and shows setup guidance instead of failing.
 
 ### Free-tier caveats
 

@@ -11,6 +11,9 @@ import {
   type TaskId,
 } from "@/lib/counsel";
 import {
+  describeError,
+  listModels,
+  markExhausted,
   streamCompletion,
   type ResolvedProvider,
   type StreamEvent,
@@ -20,11 +23,11 @@ import { formatHits, searchBackend, searchMany } from "@/lib/search";
 import { chunkDocument, documentBudget, estimateTokens } from "@/lib/tokens";
 
 /**
- * The work happens here: decide how the model gets at the web, fit the
- * request into whatever budget the provider's free tier allows, and if a
- * document is too long for one request, read it in parts and synthesise.
+ * The work happens here: get sources, fit the request into the budget the
+ * free tiers allow, read long documents in parts — and when a provider runs
+ * out, hand the request to the next one rather than fail.
  *
- * The route stays thin; this is where "works on any API" is earned.
+ * The route stays thin; this is where "never runs out" is earned.
  */
 
 export type AttachedDocument = { name: string; text: string };
@@ -37,11 +40,15 @@ export type PipelineEvent =
       model: string;
       search: SearchMode;
       parts: number;
+      chain: string[];
     }
+  /** Emitted when a provider is about to answer — the last one wins. */
+  | { type: "provider"; label: string; model: string }
   | { type: "progress"; text: string; step?: number; total?: number };
 
 export type PipelineArgs = {
-  provider: ResolvedProvider;
+  /** Failover chain, best first. Never empty. */
+  providers: ResolvedProvider[];
   /** Conversation so far; the last turn is the user's current request. */
   turns: Turn[];
   documents: AttachedDocument[];
@@ -54,93 +61,187 @@ export type PipelineArgs = {
 };
 
 type CallArgs = Parameters<typeof streamCompletion>[1];
+type Attempt<T> = (p: ResolvedProvider) => AsyncGenerator<PipelineEvent, T>;
 
 /** Tokens held back for the model's answer and the provider's own overhead. */
 const ANSWER_RESERVE = 2500;
 /** Share of the budget the conversation history may occupy. */
 const HISTORY_SHARE = 0.3;
-/** Back-off schedule for rate limits, in ms. Free tiers reset per minute. */
-const BACKOFF = [2000, 6000, 15000];
+/** How long a rate-limited provider sits out. Free tiers reset per minute. */
+const COOLDOWN_MS = 60_000;
+/** If every provider is limited at once, wait this long and go round again. */
+const ALL_LIMITED_WAIT_MS = 20_000;
 
 function budgetFor(provider: ResolvedProvider): number {
   const override = Number(process.env.AI_BUDGET_TOKENS);
   return Number.isFinite(override) && override > 0 ? override : provider.requestBudget;
 }
 
+const abortError = () => Object.assign(new Error("aborted"), { name: "AbortError" });
+
 function sleep(ms: number, signal?: AbortSignal) {
   return new Promise<void>((resolve, reject) => {
+    // A signal that was aborted before we got here must not cost the full wait.
+    if (signal?.aborted) return reject(abortError());
     const t = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(t);
-      reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
-    });
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(t);
+        reject(abortError());
+      },
+      { once: true },
+    );
   });
 }
 
-function isRateLimit(err: unknown): boolean {
+const isAbort = (err: unknown) => (err as Error)?.name === "AbortError";
+
+type Failure = "rate" | "auth" | "model" | "credit" | "other";
+
+function classify(err: unknown): Failure {
   const status =
     typeof err === "object" && err !== null && "status" in err
       ? Number((err as { status?: unknown }).status)
       : undefined;
-  return (
-    status === 429 || /rate.?limit|too many requests|RESOURCE_EXHAUSTED/i.test(String(err))
-  );
+  const raw = err instanceof Error ? err.message : String(err);
+  if (status === 429 || /rate.?limit|too many requests|RESOURCE_EXHAUSTED/i.test(raw)) return "rate";
+  if (status === 401 || status === 403 || /api key|unauthori[sz]ed|PERMISSION_DENIED|invalid.*token/i.test(raw)) return "auth";
+  if (status === 404 || /not found|does not exist|unknown model|decommissioned|NOT_FOUND/i.test(raw)) return "model";
+  if (status === 402 || /insufficient|credit|billing|payment/i.test(raw)) return "credit";
+  return "other";
+}
+
+const FAILURE_LABEL: Record<Failure, string> = {
+  rate: "rate limit",
+  auth: "key rejected",
+  model: "model not available",
+  credit: "no credit",
+  other: "error",
+};
+
+/** Wraps an error from an attempt that had already streamed output. */
+export class PartialOutput extends Error {
+  constructor(public readonly inner: unknown) {
+    super("partial output");
+  }
 }
 
 /**
- * Run one provider call to completion, retrying on rate limits with back-off.
- * Yields progress so the UI can say why it is waiting rather than going quiet.
+ * Every provider in the chain failed. The message already names each one and
+ * why, so the route must show it as-is rather than re-describe it.
  */
-async function* completeWithRetry(
-  provider: ResolvedProvider,
-  args: CallArgs,
-  label: string,
-): AsyncGenerator<PipelineEvent, { text: string; sources: Source[] }> {
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      let text = "";
-      let sources: Source[] = [];
-      for await (const ev of streamCompletion(provider, args)) {
-        if (ev.type === "text") text += ev.text;
-        else if (ev.type === "sources") sources = ev.sources;
-      }
-      return { text, sources };
-    } catch (err) {
-      if (!isRateLimit(err) || attempt >= BACKOFF.length) throw err;
-      const wait = BACKOFF[attempt];
-      yield {
-        type: "progress",
-        text: `${provider.label} rate limit reached while ${label} — retrying in ${Math.round(wait / 1000)}s.`,
-      };
-      await sleep(wait, args.signal);
-    }
+export class ChainExhausted extends Error {
+  constructor(public readonly failures: string[]) {
+    super(
+      failures.length
+        ? `Every configured provider failed.\n${failures.join("\n")}`
+        : "No provider was available.",
+    );
+    this.name = "ChainExhausted";
   }
 }
 
-/** Stream the final answer, retrying on a rate limit only if nothing was emitted yet. */
-async function* streamWithRetry(
-  provider: ResolvedProvider,
-  args: CallArgs,
+/**
+ * Try each provider in turn until one completes the attempt.
+ *
+ * A rate limit moves straight to the next provider and puts the limited one
+ * on cooldown; a rejected key, missing model or empty credit skips it for
+ * this request. If every provider is rate-limited at once, wait and go round
+ * once more. An attempt that already streamed output is never retried
+ * elsewhere — the user would see two half-answers.
+ */
+export async function* withFailover<T>(
+  providers: ResolvedProvider[],
   label: string,
-): AsyncGenerator<PipelineEvent> {
-  for (let attempt = 0; ; attempt += 1) {
+  attempt: Attempt<T>,
+  signal?: AbortSignal,
+): AsyncGenerator<PipelineEvent, T> {
+  const skipped = new Set<string>();
+  const failures: string[] = [];
+
+  for (let round = 0; round < 2; round += 1) {
+    let sawRateLimit = false;
+
+    for (const p of providers) {
+      if (skipped.has(p.id)) continue;
+      try {
+        return yield* attempt(p);
+      } catch (err) {
+        if (isAbort(err)) throw err;
+        if (err instanceof PartialOutput) throw err.inner;
+
+        const kind = classify(err);
+        failures.push(`${p.label}: ${describeError(err, p.model, p.label)}`);
+
+        if (kind === "rate") {
+          sawRateLimit = true;
+          markExhausted(p.id, COOLDOWN_MS);
+          yield {
+            type: "progress",
+            text: `${p.label} hit its free-tier limit while ${label} — switching provider.`,
+          };
+          continue;
+        }
+
+        skipped.add(p.id);
+        if (kind === "model") {
+          const ids = await listModels(p).catch(() => [] as string[]);
+          yield {
+            type: "notice",
+            text: ids.length
+              ? `${p.label} does not offer "${p.model}". Set ${p.envModel} to one of: ${ids.slice(0, 8).join(", ")}${ids.length > 8 ? ", …" : ""}.`
+              : `${p.label} does not offer "${p.model}". Set ${p.envModel} to a current model ID.`,
+          };
+        }
+        yield {
+          type: "progress",
+          text: `${p.label} unavailable (${FAILURE_LABEL[kind]}) — trying the next provider.`,
+        };
+      }
+    }
+
+    const remaining = providers.filter((p) => !skipped.has(p.id));
+    if (!sawRateLimit || remaining.length === 0 || round === 1) break;
+    yield {
+      type: "progress",
+      text: `Every provider is rate-limited right now — waiting ${ALL_LIMITED_WAIT_MS / 1000}s for limits to reset.`,
+    };
+    await sleep(ALL_LIMITED_WAIT_MS, signal);
+  }
+
+  throw new ChainExhausted(failures);
+}
+
+/** A non-streaming attempt: drain the stream and hand back the text. */
+function complete(
+  args: (p: ResolvedProvider) => CallArgs,
+): Attempt<{ text: string; sources: Source[] }> {
+  return async function* (p) {
+    let text = "";
+    let sources: Source[] = [];
+    for await (const ev of streamCompletion(p, args(p))) {
+      if (ev.type === "text") text += ev.text;
+      else if (ev.type === "sources") sources = ev.sources;
+    }
+    return { text, sources };
+  };
+}
+
+/** A streaming attempt: pass events through; once text has flowed, no failover. */
+function stream(args: (p: ResolvedProvider) => CallArgs): Attempt<void> {
+  return async function* (p) {
     let emitted = false;
+    yield { type: "provider", label: p.label, model: p.model };
     try {
-      for await (const ev of streamCompletion(provider, args)) {
-        emitted = true;
+      for await (const ev of streamCompletion(p, args(p))) {
+        if (ev.type === "text") emitted = true;
         yield ev;
       }
-      return;
     } catch (err) {
-      if (emitted || !isRateLimit(err) || attempt >= BACKOFF.length) throw err;
-      const wait = BACKOFF[attempt];
-      yield {
-        type: "progress",
-        text: `${provider.label} rate limit reached while ${label} — retrying in ${Math.round(wait / 1000)}s.`,
-      };
-      await sleep(wait, args.signal);
+      throw emitted ? new PartialOutput(err) : err;
     }
-  }
+  };
 }
 
 /** Keep the most recent turns that fit the history share of the budget. */
@@ -157,27 +258,8 @@ function trimHistory(turns: Turn[], maxTokens: number): Turn[] {
   return kept;
 }
 
-/** Ask the model for the two or three searches it would run. Cheap and short. */
-async function* deriveQueries(
-  provider: ResolvedProvider,
-  request: string,
-  jurisdiction: JurisdictionId,
-  signal?: AbortSignal,
-): AsyncGenerator<PipelineEvent, string[]> {
-  const where = jurisdiction === "auto" ? "Cameroon, Mozambique or CEMAC" : jurisdiction;
-  const system = `You write web search queries for a legal researcher working on ${where} law. Reply with two or three queries, one per line, nothing else. Prefer queries that find the governing instrument, the regulator's current rule, or the current figure. Include the jurisdiction and, where useful, the name of the statute or Uniform Act.`;
-  const result = yield* completeWithRetry(
-    provider,
-    {
-      system,
-      turns: [{ role: "user", content: request.slice(0, 4000) }],
-      effort: "medium",
-      research: false,
-      signal,
-    },
-    "planning searches",
-  );
-  return result.text
+function parseQueries(text: string): string[] {
+  return text
     .split("\n")
     .map((l) => l.replace(/^[\s\-*\d.)]+/, "").replace(/^["']|["']$/g, "").trim())
     .filter((l) => l.length > 6 && l.length < 200)
@@ -185,49 +267,35 @@ async function* deriveQueries(
 }
 
 export async function* runPipeline(a: PipelineArgs): AsyncGenerator<PipelineEvent> {
-  const { provider, signal } = a;
+  const { providers, signal } = a;
   const request = a.turns[a.turns.length - 1]?.content ?? "";
 
-  // 1. Decide how the web gets involved.
-  const backend = searchBackend();
-  const search: SearchMode =
-    a.research && provider.canSearch
-      ? "native"
-      : a.research && backend
-        ? "provided"
-        : "none";
-
-  const system = buildSystem({
-    jurisdiction: a.jurisdiction,
-    language: a.language,
-    search,
-    task: a.task,
-  });
-
-  // 2. Budget.
-  const budget = budgetFor(provider);
-  const systemTokens = estimateTokens(system);
-  const history = trimHistory(a.turns, Math.floor(budget * HISTORY_SHARE));
-  const historyTokens = history.reduce((n, t) => n + estimateTokens(t.content), 0);
-  const docBudget = documentBudget({
-    requestBudget: budget,
-    systemTokens,
-    historyTokens,
-    answerReserve: ANSWER_RESERVE,
-  });
-
-  // 3. External search, if that is the mode. Results are prepended to the
-  //    request so the model reads them before the question.
+  // 1. External retrieval first, whenever a search backend exists. It costs
+  //    one small call, and it means a fallback provider without native search
+  //    still answers from sources.
   let retrieved = "";
   let retrievedSources: Source[] = [];
-  if (search === "provided") {
+  if (a.research && searchBackend()) {
     yield { type: "searching", active: true };
     yield { type: "progress", text: "Planning searches…" };
+    const where = a.jurisdiction === "auto" ? "Cameroon, Mozambique or CEMAC" : a.jurisdiction;
     let queries: string[] = [];
     try {
-      queries = yield* deriveQueries(provider, request, a.jurisdiction, signal);
-    } catch {
-      queries = [];
+      const planned = yield* withFailover(
+        providers,
+        "planning searches",
+        complete(() => ({
+          system: `You write web search queries for a legal researcher working on ${where} law. Reply with two or three queries, one per line, nothing else. Prefer queries that find the governing instrument, the regulator's current rule, or the current figure. Include the jurisdiction and, where useful, the name of the statute or Uniform Act.`,
+          turns: [{ role: "user", content: request.slice(0, 4000) }],
+          effort: "medium",
+          research: false,
+          signal,
+        })),
+        signal,
+      );
+      queries = parseQueries(planned.text);
+    } catch (err) {
+      if (isAbort(err)) throw err;
     }
     if (queries.length === 0) queries = [request.slice(0, 200)];
     yield { type: "progress", text: `Searching: ${queries.join(" · ")}` };
@@ -238,10 +306,11 @@ export async function* runPipeline(a: PipelineArgs): AsyncGenerator<PipelineEven
       if (hits.length === 0) {
         yield {
           type: "notice",
-          text: "Web search returned nothing usable — check the search key if this keeps happening. The answer below is from the model's own knowledge and says what to verify.",
+          text: "Web search returned nothing usable for this question; the answer is from the model's own knowledge and says what to verify.",
         };
       }
-    } catch {
+    } catch (err) {
+      if (isAbort(err)) throw err;
       yield {
         type: "notice",
         text: "Web search failed this time; the answer is from the model's own knowledge.",
@@ -250,12 +319,37 @@ export async function* runPipeline(a: PipelineArgs): AsyncGenerator<PipelineEven
     yield { type: "searching", active: false };
   }
 
+  // 2. The system prompt depends on the provider: one that searches natively
+  //    is told so; the others are told sources were provided, or that there
+  //    is no web access at all. Rebuilt on every failover.
+  const modeFor = (p: ResolvedProvider): SearchMode =>
+    a.research && p.canSearch ? "native" : retrieved ? "provided" : "none";
+  const systemFor = (p: ResolvedProvider) =>
+    buildSystem({
+      jurisdiction: a.jurisdiction,
+      language: a.language,
+      search: modeFor(p),
+      task: a.task,
+    });
+
+  // 3. Budget: the tightest in the chain, so a chunk sized for the first
+  //    provider still fits whichever one ends up answering.
+  const budget = Math.min(...providers.map(budgetFor));
+  const systemTokens = Math.max(...providers.map((p) => estimateTokens(systemFor(p))));
+  const history = trimHistory(a.turns, Math.floor(budget * HISTORY_SHARE));
+  const historyTokens = history.reduce((n, t) => n + estimateTokens(t.content), 0);
+  const docBudget = documentBudget({
+    requestBudget: budget,
+    systemTokens,
+    historyTokens,
+    answerReserve: ANSWER_RESERVE,
+  });
+
   // 4. Documents: single pass if they fit, otherwise read in parts.
   const docs = a.documents.filter((d) => d.text.trim());
   const docTokens = docs.reduce((n, d) => n + estimateTokens(d.text), 0);
   const retrievedTokens = estimateTokens(retrieved);
   const singlePass = docTokens + retrievedTokens <= docBudget;
-
   const chunks = singlePass
     ? []
     : docs.flatMap((d) =>
@@ -265,25 +359,32 @@ export async function* runPipeline(a: PipelineArgs): AsyncGenerator<PipelineEven
         })),
       );
 
+  const primary = providers[0];
   yield {
     type: "meta",
-    provider: provider.label,
-    model: provider.model,
-    search,
+    provider: primary.label,
+    model: primary.model,
+    search: modeFor(primary),
     parts: singlePass ? (docs.length ? 1 : 0) : chunks.length,
+    chain: providers.map((p) => p.label),
   };
-
-  const native = search === "native";
 
   // 5a. Everything fits: one streamed request.
   if (singlePass) {
     const framed = docs.map((d) => frameDocument(d.name, d.text)).join("\n\n");
     const last = [retrieved, framed, request].filter(Boolean).join("\n\n");
     const turns: Turn[] = [...history.slice(0, -1), { role: "user", content: last }];
-    yield* streamWithRetry(
-      provider,
-      { system, turns, effort: a.effort, research: native, signal },
+    yield* withFailover(
+      providers,
       "answering",
+      stream((p) => ({
+        system: systemFor(p),
+        turns,
+        effort: a.effort,
+        research: modeFor(p) === "native",
+        signal,
+      })),
+      signal,
     );
     if (retrievedSources.length) yield { type: "sources", sources: retrievedSources };
     return;
@@ -298,21 +399,21 @@ export async function* runPipeline(a: PipelineArgs): AsyncGenerator<PipelineEven
       step: notes.length + 1,
       total: chunks.length,
     };
-    const partSystem = `${system}\n\n## This step\n\n${CHUNK_DIRECTIVE[a.task]}`;
     const content = [
       `The user's request, for context: ${request.slice(0, 2000)}`,
       frameDocument(chunk.name, chunk.text, { index: chunk.index, total: chunk.total }),
     ].join("\n\n");
-    const result = yield* completeWithRetry(
-      provider,
-      {
-        system: partSystem,
+    const result = yield* withFailover(
+      providers,
+      `reading part ${chunk.index + 1}`,
+      complete((p) => ({
+        system: `${systemFor(p)}\n\n## This step\n\n${CHUNK_DIRECTIVE[a.task]}`,
         turns: [{ role: "user", content }],
         effort: "medium",
         research: false,
         signal,
-      },
-      `reading part ${chunk.index + 1}`,
+      })),
+      signal,
     );
     notes.push(
       `### Notes from ${chunk.name}, part ${chunk.index + 1} of ${chunk.total}\n\n${result.text.trim()}`,
@@ -321,15 +422,19 @@ export async function* runPipeline(a: PipelineArgs): AsyncGenerator<PipelineEven
 
   // 5c. Reduce: one streamed request over the notes.
   yield { type: "progress", text: "Bringing it together…" };
-  const reduceSystem = `${system}\n\n## This step\n\n${synthesisDirective(a.task, chunks.length)}`;
-  const last = [retrieved, notes.join("\n\n"), `---\n\n${request}`]
-    .filter(Boolean)
-    .join("\n\n");
+  const last = [retrieved, notes.join("\n\n"), `---\n\n${request}`].filter(Boolean).join("\n\n");
   const turns: Turn[] = [...history.slice(0, -1), { role: "user", content: last }];
-  yield* streamWithRetry(
-    provider,
-    { system: reduceSystem, turns, effort: a.effort, research: native, signal },
+  yield* withFailover(
+    providers,
     "writing the answer",
+    stream((p) => ({
+      system: `${systemFor(p)}\n\n## This step\n\n${synthesisDirective(a.task, chunks.length)}`,
+      turns,
+      effort: a.effort,
+      research: modeFor(p) === "native",
+      signal,
+    })),
+    signal,
   );
   if (retrievedSources.length) yield { type: "sources", sources: retrievedSources };
 }

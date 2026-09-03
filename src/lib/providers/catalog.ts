@@ -34,6 +34,35 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     // Free tier is ~12k tokens/minute on the 70B model; the window is 128k.
     requestBudget: 9000,
   },
+  sambanova: {
+    id: "sambanova",
+    label: "SambaNova",
+    envKey: "SAMBANOVA_API_KEY",
+    envModel: "SAMBANOVA_MODEL",
+    // Serves DeepSeek V3 on its free tier — the free way to get DeepSeek.
+    defaultModel: "DeepSeek-V3-0324",
+    console: "https://cloud.sambanova.ai/apis",
+    pricing: "Free tier, no card. Fast.",
+    free: true,
+    supportsSearch: false,
+    supportsReasoningEffort: false,
+    baseUrl: "https://api.sambanova.ai/v1",
+    requestBudget: 16000,
+  },
+  nvidia: {
+    id: "nvidia",
+    label: "NVIDIA NIM",
+    envKey: "NVIDIA_API_KEY",
+    envModel: "NVIDIA_MODEL",
+    defaultModel: "meta/llama-3.3-70b-instruct",
+    console: "https://build.nvidia.com",
+    pricing: "Free with an NVIDIA developer account, rate-limited.",
+    free: true,
+    supportsSearch: false,
+    supportsReasoningEffort: false,
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    requestBudget: 16000,
+  },
   cerebras: {
     id: "cerebras",
     label: "Cerebras",
@@ -95,6 +124,22 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     // GitHub Models caps input around 8k on the free tier.
     requestBudget: 7000,
   },
+  deepseek: {
+    id: "deepseek",
+    label: "DeepSeek",
+    envKey: "DEEPSEEK_API_KEY",
+    envModel: "DEEPSEEK_MODEL",
+    defaultModel: "deepseek-chat",
+    console: "https://platform.deepseek.com/api_keys",
+    // Direct access needs a top-up. The free routes to DeepSeek models are
+    // SambaNova above and OpenRouter's ":free" variants.
+    pricing: "Paid but very cheap; needs a top-up. Free via SambaNova or OpenRouter instead.",
+    free: false,
+    supportsSearch: false,
+    supportsReasoningEffort: false,
+    baseUrl: "https://api.deepseek.com/v1",
+    requestBudget: 60000,
+  },
   perplexity: {
     id: "perplexity",
     label: "Perplexity",
@@ -111,14 +156,21 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
   },
 };
 
-/** Preference order when AI_PROVIDER is not set: searchers first, then free. */
+/**
+ * Try order. Also the failover order: when one provider's free tier is
+ * exhausted the request moves to the next. Free and capable first; paid last,
+ * so a top-up is only spent once every free tier is out.
+ */
 export const PREFERENCE: ProviderId[] = [
-  "perplexity",
   "groq",
+  "sambanova",
+  "nvidia",
   "cerebras",
   "mistral",
   "openrouter",
   "github",
+  "perplexity",
+  "deepseek",
 ];
 
 /** Does this specific model retrieve live sources? */

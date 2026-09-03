@@ -6,12 +6,12 @@ import {
   type LanguageId,
   type TaskId,
 } from "@/lib/counsel";
-import { runPipeline, type AttachedDocument } from "@/lib/pipeline";
+import { ChainExhausted, runPipeline, type AttachedDocument } from "@/lib/pipeline";
 import {
   DEFAULT_PROVIDER,
   PROVIDERS,
   describeError,
-  resolveProvider,
+  resolveProviders,
   type Turn,
 } from "@/lib/providers";
 
@@ -35,7 +35,8 @@ function line(obj: unknown) {
 const TASK_IDS = new Set<string>(TASKS.map((t) => t.id));
 
 export async function POST(req: NextRequest) {
-  const provider = resolveProvider();
+  const providers = resolveProviders();
+  const provider = providers[0];
 
   if (!provider) {
     const d = PROVIDERS[DEFAULT_PROVIDER];
@@ -78,7 +79,7 @@ export async function POST(req: NextRequest) {
     async start(controller) {
       try {
         const events = runPipeline({
-          provider,
+          providers,
           turns,
           documents,
           task,
@@ -95,7 +96,12 @@ export async function POST(req: NextRequest) {
           controller.enqueue(
             line({
               type: "error",
-              message: describeError(err, provider.model, provider.label),
+              // The chain's own summary already names each provider and why;
+              // re-describing it would collapse that into one generic line.
+              message:
+                err instanceof ChainExhausted
+                  ? err.message
+                  : describeError(err, provider.model, provider.label),
             }),
           );
         }

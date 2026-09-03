@@ -40,6 +40,8 @@ type Turn = {
   /** Names of documents that were attached to this request, for display. */
   documents?: { name: string; chars: number }[];
   task?: TaskId;
+  /** "Groq · openai/gpt-oss-120b" — whichever provider in the chain answered. */
+  provider?: string;
 };
 
 /** A file the user attached, already reduced to text by /api/extract. */
@@ -240,7 +242,8 @@ export default function Page() {
           if (!raw.trim()) return;
           const evt = JSON.parse(raw) as
             | { type: "text"; text: string }
-            | { type: "meta"; provider: string; model: string; search: string; parts: number }
+            | { type: "meta"; provider: string; model: string; search: string; parts: number; chain?: string[] }
+            | { type: "provider"; label: string; model: string }
             | { type: "progress"; text: string; step?: number; total?: number }
             | { type: "searching"; active: boolean }
             | { type: "sources"; sources: Source[] }
@@ -258,6 +261,12 @@ export default function Page() {
             );
           } else if (evt.type === "progress") {
             setProgress(evt.text);
+          } else if (evt.type === "provider") {
+            setTurns((prev) =>
+              prev.map((t) =>
+                t.id === assistantId ? { ...t, provider: `${evt.label} · ${evt.model}` } : t,
+              ),
+            );
           } else if (evt.type === "meta") {
             if (evt.parts > 1) {
               setProgress(`Long document — reading it in ${evt.parts} parts.`);
@@ -861,6 +870,12 @@ function Sidebar({
                   <span className="font-mono text-[10px]">{status.model}</span>
                   {" · "}
                   {status.search.mode ? `web search ${status.search.label}` : "no web access"}
+                  {status.chain.length > 1 && (
+                    <>
+                      <br />
+                      Failover: {status.chain.map((c) => c.label).join(" → ")}
+                    </>
+                  )}
                 </>
               ) : (
                 <>No AI provider configured.</>
@@ -1077,6 +1092,9 @@ function Message({
           <Sources sources={turn.sources} />
         )}
       </div>
+      {turn.provider && (
+        <p className="mt-1.5 pl-1 text-[10px] text-muted">Answered by {turn.provider}</p>
+      )}
     </article>
   );
 }

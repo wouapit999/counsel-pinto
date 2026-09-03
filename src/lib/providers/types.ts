@@ -3,10 +3,13 @@ import type { EffortId, Source } from "@/lib/counsel";
 /** Every provider the app knows how to talk to. */
 export type ProviderId =
   | "groq"
+  | "sambanova"
+  | "nvidia"
   | "cerebras"
   | "mistral"
   | "openrouter"
   | "github"
+  | "deepseek"
   | "perplexity";
 
 export type Turn = { role: "user" | "assistant"; content: string };
@@ -92,4 +95,10 @@ export type ProviderStatus = {
    * `tavily`/`brave` = we search and hand results in; null = no web access.
    */
   search: { mode: "native" | "tavily" | "brave" | null; label: string };
+  /**
+   * Every configured provider, in the order the app will try them. A rate
+   * limit on one hands the request to the next, so the chain is what
+   * "never runs out" actually means.
+   */
+  chain: { id: ProviderId; label: string; model: string }[];
 };

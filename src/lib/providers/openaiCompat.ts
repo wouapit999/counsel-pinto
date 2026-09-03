@@ -1,6 +1,6 @@
 import type { EffortId, Source } from "@/lib/counsel";
 import { hostOf } from "./util";
-import type { Adapter } from "./types";
+import type { Adapter, ResolvedProvider } from "./types";
 
 /**
  * One adapter for every provider that speaks OpenAI's /chat/completions:
@@ -166,3 +166,19 @@ export const openAiCompatAdapter: Adapter = async function* (spec, args) {
     };
   }
 };
+
+/**
+ * What this key can actually use. Called when a configured model ID is
+ * rejected, so the error can say what to switch to instead of just "no".
+ */
+export async function listModels(spec: ResolvedProvider): Promise<string[]> {
+  const res = await fetch(`${spec.baseUrl}/models`, {
+    headers: { Authorization: `Bearer ${spec.apiKey}` },
+  });
+  if (!res.ok) return [];
+  const data = (await res.json()) as { data?: { id?: string }[] };
+  return (data.data ?? [])
+    .map((m) => m.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0)
+    .sort();
+}

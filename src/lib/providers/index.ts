@@ -1,45 +1,69 @@
 import { SEARCH_BACKENDS, searchBackend } from "@/lib/search";
 import { PREFERENCE, PROVIDERS, modelCanSearch } from "./catalog";
-import { openAiCompatAdapter } from "./openaiCompat";
+import { listModels, openAiCompatAdapter } from "./openaiCompat";
 import type { Adapter, ProviderId, ProviderStatus, ResolvedProvider } from "./types";
 
 export * from "./types";
 export { PROVIDERS, PREFERENCE, modelCanSearch } from "./catalog";
 export { describeError } from "./util";
+export { listModels };
 
 /** The provider suggested when nothing is configured yet. */
 export const DEFAULT_PROVIDER: ProviderId = "groq";
+
+/**
+ * Providers that recently hit a rate limit, with the time the limit is
+ * expected to have reset. Module-level, so it survives across requests on a
+ * warm serverless instance; a cold start simply forgets, which is harmless.
+ */
+const cooldown = new Map<ProviderId, number>();
+
+export function markExhausted(id: ProviderId, ms: number) {
+  cooldown.set(id, Date.now() + ms);
+}
+
+function coolingDown(id: ProviderId): boolean {
+  return (cooldown.get(id) ?? 0) > Date.now();
+}
 
 function keyFor(id: ProviderId): string | undefined {
   const value = process.env[PROVIDERS[id].envKey];
   return value && value.trim() ? value.trim() : undefined;
 }
 
-/** Every provider that has a key present. */
+function resolve(id: ProviderId): ResolvedProvider | null {
+  const apiKey = keyFor(id);
+  if (!apiKey) return null;
+  const spec = PROVIDERS[id];
+  const model = process.env[spec.envModel]?.trim() || spec.defaultModel;
+  return { ...spec, apiKey, model, canSearch: modelCanSearch(spec, model) };
+}
+
+/** Every provider with a key, in try order. AI_PROVIDER moves one to the front. */
 export function configuredProviders(): ProviderId[] {
-  return PREFERENCE.filter((id) => keyFor(id) !== undefined);
+  const pinned = process.env.AI_PROVIDER?.trim().toLowerCase() as ProviderId | undefined;
+  const order =
+    pinned && pinned in PROVIDERS ? [pinned, ...PREFERENCE.filter((p) => p !== pinned)] : PREFERENCE;
+  return order.filter((id) => keyFor(id) !== undefined);
 }
 
 /**
- * Which provider to use. AI_PROVIDER pins one explicitly; otherwise the first
- * configured provider in preference order wins, so adding a key is all it
- * takes to switch. Returns null when nothing is configured — the caller turns
- * that into setup guidance rather than an error.
+ * The failover chain. Providers known to be rate-limited right now are moved
+ * to the back rather than dropped — if everything is limited, the app still
+ * has something to retry against after a wait.
  */
+export function resolveProviders(): ResolvedProvider[] {
+  const all = configuredProviders()
+    .map(resolve)
+    .filter((p): p is ResolvedProvider => p !== null);
+  const ready = all.filter((p) => !coolingDown(p.id));
+  const cooling = all.filter((p) => coolingDown(p.id));
+  return [...ready, ...cooling];
+}
+
+/** The provider that will be tried first, or null when nothing is configured. */
 export function resolveProvider(): ResolvedProvider | null {
-  const pinned = process.env.AI_PROVIDER?.trim().toLowerCase() as ProviderId | undefined;
-
-  const candidates: ProviderId[] =
-    pinned && pinned in PROVIDERS ? [pinned] : configuredProviders();
-
-  for (const id of candidates) {
-    const apiKey = keyFor(id);
-    if (!apiKey) continue;
-    const spec = PROVIDERS[id];
-    const model = process.env[spec.envModel]?.trim() || spec.defaultModel;
-    return { ...spec, apiKey, model, canSearch: modelCanSearch(spec, model) };
-  }
-  return null;
+  return resolveProviders()[0] ?? null;
 }
 
 /**
@@ -59,7 +83,8 @@ function searchStatus(active: ResolvedProvider | null): ProviderStatus["search"]
 
 /** Safe to send to the browser — contains no key material. */
 export function providerStatus(): ProviderStatus {
-  const active = resolveProvider();
+  const chain = resolveProviders();
+  const active = chain[0] ?? null;
   const search = searchStatus(active);
 
   if (!active) {
@@ -75,6 +100,7 @@ export function providerStatus(): ProviderStatus {
       envKey: fallback.envKey,
       configured: [],
       search,
+      chain: [],
     };
   }
 
@@ -88,7 +114,8 @@ export function providerStatus(): ProviderStatus {
     pricing: active.pricing,
     console: active.console,
     envKey: active.envKey,
-    configured: configuredProviders(),
+    configured: chain.map((p) => p.id),
     search,
+    chain: chain.map((p) => ({ id: p.id, label: p.label, model: p.model })),
   };
 }
