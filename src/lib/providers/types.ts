@@ -54,8 +54,10 @@ export type ProviderSpec = {
    * resolved model, not of the provider alone.
    */
   searchModels?: RegExp;
-  /** Does it accept OpenAI's `reasoning_effort`? */
+  /** Does every model on this provider accept OpenAI's `reasoning_effort`? */
   supportsReasoningEffort: boolean;
+  /** Models that accept it when the provider as a whole does not. */
+  reasoningModels?: RegExp;
   baseUrl: string;
   /**
    * Practical per-request input budget in tokens. Not the model's context

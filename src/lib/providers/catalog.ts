@@ -18,9 +18,13 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     label: "Groq",
     envKey: "GROQ_API_KEY",
     envModel: "GROQ_MODEL",
-    // Reliable default. Set GROQ_MODEL=groq/compound to turn search on.
-    defaultModel: "llama-3.3-70b-versatile",
+    // llama-3.3-70b-versatile was retired from the free tier on 2026-08-16;
+    // gpt-oss-120b is Groq's recommended general replacement. Set
+    // GROQ_MODEL=groq/compound to turn search on instead.
+    defaultModel: "openai/gpt-oss-120b",
     searchModels: /compound/i,
+    // gpt-oss accepts reasoning_effort, so Analysis depth works on it.
+    reasoningModels: /gpt-oss/i,
     console: "https://console.groq.com/keys",
     pricing: "Free tier, no card required. Very fast.",
     free: true,

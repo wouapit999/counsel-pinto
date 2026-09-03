@@ -53,7 +53,7 @@ Open http://localhost:3000. If no key is set the app still runs and tells you wh
 | GitHub Models | Yes, rate-limited | No | github.com/settings/tokens |
 | Perplexity | Paid | Yes | perplexity.ai/settings/api |
 
-**Groq is the one to use**, and if the answers need to be current, set `GROQ_MODEL` to a compound model. Those run web search server-side and report what they used, which is the only way to get free *and* sourced. The default (`llama-3.3-70b-versatile`) is the safer starting point but answers from training data alone.
+**Groq is the one to use.** The default model is `openai/gpt-oss-120b` — Groq's recommended replacement after `llama-3.3-70b-versatile` was retired from the free tier on 16 August 2026, which is a live example of why every model ID here is overridable. For sourced answers either set a `TAVILY_API_KEY` (works with any model) or set `GROQ_MODEL` to a compound model, which searches natively.
 
 Search capability is a property of the **model**, not the provider — `src/lib/providers/catalog.ts` matches it per model, so switching `GROQ_MODEL` to a compound system enables the search toggle automatically.
 

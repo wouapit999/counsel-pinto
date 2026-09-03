@@ -87,7 +87,7 @@ export const openAiCompatAdapter: Adapter = async function* (spec, args) {
         { role: "system", content: args.system },
         ...args.turns.map((t) => ({ role: t.role, content: t.content })),
       ],
-      ...(spec.supportsReasoningEffort
+      ...(spec.supportsReasoningEffort || spec.reasoningModels?.test(spec.model)
         ? { reasoning_effort: REASONING[args.effort] ?? "medium" }
         : {}),
     }),
