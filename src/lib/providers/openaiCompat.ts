@@ -102,8 +102,18 @@ export const openAiCompatAdapter: Adapter = async function* (spec, args) {
     } catch {
       /* not JSON — the raw body is the best we have */
     }
+    // Providers say how long to wait — Groq puts "try again in 7.5s" in the
+    // body, others use a Retry-After header. Pass it up so the chain can wait
+    // exactly that long instead of guessing.
+    const header = Number(res.headers.get("retry-after"));
+    const m = /try again in\s*([\d.]+)\s*(ms|s|m)\b/i.exec(detail);
+    const fromBody = m
+      ? Number(m[1]) * (m[2] === "ms" ? 1 : m[2] === "m" ? 60_000 : 1000)
+      : NaN;
+    const retryAfterMs = [header * 1000, fromBody].find((n) => Number.isFinite(n) && n > 0);
     throw Object.assign(new Error(message || `HTTP ${res.status}`), {
       status: res.status,
+      retryAfterMs,
     });
   }
 

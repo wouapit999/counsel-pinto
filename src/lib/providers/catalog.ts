@@ -31,8 +31,10 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     supportsSearch: false,
     supportsReasoningEffort: false,
     baseUrl: "https://api.groq.com/openai/v1",
-    // Free tier is ~12k tokens/minute on the 70B model; the window is 128k.
-    requestBudget: 9000,
+    // gpt-oss-120b's free tier is ~8k tokens/minute, and the system prompt
+    // alone is ~2.5k, so two requests in a minute can trip it. Keep each
+    // request well inside the cap.
+    requestBudget: 5500,
   },
   sambanova: {
     id: "sambanova",

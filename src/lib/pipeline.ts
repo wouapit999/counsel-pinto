@@ -69,8 +69,24 @@ const ANSWER_RESERVE = 2500;
 const HISTORY_SHARE = 0.3;
 /** How long a rate-limited provider sits out. Free tiers reset per minute. */
 const COOLDOWN_MS = 60_000;
-/** If every provider is limited at once, wait this long and go round again. */
-const ALL_LIMITED_WAIT_MS = 20_000;
+/**
+ * When every provider is limited at once: wait as long as the provider asked
+ * for (clamped), then go round again — up to MAX_ROUNDS passes. With a single
+ * provider this is what turns "rate limited" into "answered 40 seconds later"
+ * rather than an error.
+ */
+const MAX_ROUNDS = 3;
+const DEFAULT_WAIT_MS = 20_000;
+const MIN_WAIT_MS = 5_000;
+const MAX_WAIT_MS = 65_000;
+
+function retryAfterOf(err: unknown): number {
+  const v =
+    typeof err === "object" && err !== null && "retryAfterMs" in err
+      ? Number((err as { retryAfterMs?: unknown }).retryAfterMs)
+      : NaN;
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
 
 function budgetFor(provider: ResolvedProvider): number {
   const override = Number(process.env.AI_BUDGET_TOKENS);
@@ -158,10 +174,13 @@ export async function* withFailover<T>(
   signal?: AbortSignal,
 ): AsyncGenerator<PipelineEvent, T> {
   const skipped = new Set<string>();
-  const failures: string[] = [];
+  // One line per provider, latest wins — three rounds of the same limit
+  // should read as one failure, not three.
+  const failures = new Map<string, string>();
 
-  for (let round = 0; round < 2; round += 1) {
+  for (let round = 0; round < MAX_ROUNDS; round += 1) {
     let sawRateLimit = false;
+    let waitHint = 0;
 
     for (const p of providers) {
       if (skipped.has(p.id)) continue;
@@ -172,14 +191,18 @@ export async function* withFailover<T>(
         if (err instanceof PartialOutput) throw err.inner;
 
         const kind = classify(err);
-        failures.push(`${p.label}: ${describeError(err, p.model, p.label)}`);
+        failures.set(p.label, `${p.label}: ${describeError(err, p.model, p.label)}`);
 
         if (kind === "rate") {
           sawRateLimit = true;
-          markExhausted(p.id, COOLDOWN_MS);
+          waitHint = Math.max(waitHint, retryAfterOf(err));
+          markExhausted(p.id, Math.max(COOLDOWN_MS, retryAfterOf(err)));
+          const next = providers.some((q) => q !== p && !skipped.has(q.id));
           yield {
             type: "progress",
-            text: `${p.label} hit its free-tier limit while ${label} — switching provider.`,
+            text: next
+              ? `${p.label} hit its free-tier limit while ${label} — switching provider.`
+              : `${p.label} hit its free-tier limit while ${label}.`,
           };
           continue;
         }
@@ -202,15 +225,19 @@ export async function* withFailover<T>(
     }
 
     const remaining = providers.filter((p) => !skipped.has(p.id));
-    if (!sawRateLimit || remaining.length === 0 || round === 1) break;
+    if (!sawRateLimit || remaining.length === 0 || round === MAX_ROUNDS - 1) break;
+    const wait = Math.min(Math.max(waitHint || DEFAULT_WAIT_MS, MIN_WAIT_MS), MAX_WAIT_MS);
     yield {
       type: "progress",
-      text: `Every provider is rate-limited right now — waiting ${ALL_LIMITED_WAIT_MS / 1000}s for limits to reset.`,
+      text:
+        remaining.length === 1
+          ? `${remaining[0].label} is rate-limited and it is the only provider configured — waiting ${Math.ceil(wait / 1000)}s for the limit to reset (add more provider keys to avoid this wait).`
+          : `Every provider is rate-limited right now — waiting ${Math.ceil(wait / 1000)}s for limits to reset.`,
     };
-    await sleep(ALL_LIMITED_WAIT_MS, signal);
+    await sleep(wait, signal);
   }
 
-  throw new ChainExhausted(failures);
+  throw new ChainExhausted([...failures.values()]);
 }
 
 /** A non-streaming attempt: drain the stream and hand back the text. */
