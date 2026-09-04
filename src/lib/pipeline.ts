@@ -68,6 +68,8 @@ type Attempt<T> = (p: ResolvedProvider) => AsyncGenerator<PipelineEvent, T>;
 
 /** Tokens held back for the model's answer and the provider's own overhead. */
 const ANSWER_RESERVE = 2500;
+/** Below this request budget the compact persona is used. */
+const COMPACT_BELOW_TOKENS = 8000;
 /** Share of the budget the conversation history may occupy. */
 const HISTORY_SHARE = 0.3;
 /** How long a rate-limited provider sits out. Free tiers reset per minute. */
