@@ -47,13 +47,13 @@ Open http://localhost:3000. If no key is set the app still runs and tells you wh
 | Provider | Free? | Web search | Key |
 | --- | --- | --- | --- |
 | **Groq** | Yes, no card | On `compound` models | console.groq.com/keys |
-| **SambaNova** | Yes, no card — serves DeepSeek V3 | No | cloud.sambanova.ai/apis |
-| **NVIDIA NIM** | Yes, with a developer account | No | build.nvidia.com |
+| **NVIDIA NIM** | Yes, with a developer account — serves DeepSeek V4 | No | build.nvidia.com |
 | Cerebras | Yes, no card | No | cloud.cerebras.ai |
 | Mistral | Free experimental tier | No | console.mistral.ai/api-keys |
 | OpenRouter | Only on `:free` models | Only on `:online` (billed) | openrouter.ai/keys |
 | GitHub Models | Yes, rate-limited | No | github.com/settings/tokens |
 | Perplexity | Paid | Yes | perplexity.ai/settings/api |
+| SambaNova | Paid — needs a payment method on file | No | cloud.sambanova.ai/apis |
 | DeepSeek | Paid, cheap — no free tier | No | platform.deepseek.com |
 
 "No" in the search column stops mattering once a `TAVILY_API_KEY` is set: the app then searches for every model.

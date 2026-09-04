@@ -46,11 +46,10 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     // the next DeepSeek automatically.
     defaultModel: "DeepSeek-V3.2",
     console: "https://cloud.sambanova.ai/apis",
-    // Reported "insufficient credit" for a fresh account on 2026-09-03, so
-    // the free allowance is not reliable. Kept in the chain: it is skipped
-    // automatically when it says no.
-    pricing: "Free allowance varies by account; some report needing credit.",
-    free: true,
+    // Not free: on 2026-09-04 it answered "A payment method is required".
+    // Kept for people who add a card; ordered after every free provider.
+    pricing: "Paid — requires a payment method on file.",
+    free: false,
     supportsSearch: false,
     supportsReasoningEffort: false,
     baseUrl: "https://api.sambanova.ai/v1",
@@ -171,13 +170,13 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
  */
 export const PREFERENCE: ProviderId[] = [
   "groq",
-  "sambanova",
   "nvidia",
   "cerebras",
   "mistral",
   "openrouter",
   "github",
   "perplexity",
+  "sambanova",
   "deepseek",
 ];
 
