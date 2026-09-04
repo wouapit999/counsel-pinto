@@ -46,7 +46,10 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     // the next DeepSeek automatically.
     defaultModel: "DeepSeek-V3.2",
     console: "https://cloud.sambanova.ai/apis",
-    pricing: "Free tier, no card. Fast.",
+    // Reported "insufficient credit" for a fresh account on 2026-09-03, so
+    // the free allowance is not reliable. Kept in the chain: it is skipped
+    // automatically when it says no.
+    pricing: "Free allowance varies by account; some report needing credit.",
     free: true,
     supportsSearch: false,
     supportsReasoningEffort: false,

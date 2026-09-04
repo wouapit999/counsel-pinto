@@ -151,14 +151,29 @@ export class PartialOutput extends Error {
  * why, so the route must show it as-is rather than re-describe it.
  */
 export class ChainExhausted extends Error {
-  constructor(public readonly failures: string[]) {
-    super(
-      failures.length
-        ? `Every configured provider failed.\n${failures.join("\n")}`
-        : "No provider was available.",
-    );
+  constructor(
+    public readonly failures: string[],
+    /** True when every failure was a quota (rate limit or credit), not a fault. */
+    quotaOnly = false,
+  ) {
+    const lines = failures.length
+      ? [`Every configured provider failed.`, ...failures]
+      : ["No provider was available."];
+    if (quotaOnly) {
+      lines.push(
+        "",
+        "These are quota limits, not faults. Add another free provider key and the chain moves on without waiting: NVIDIA (build.nvidia.com), Cerebras (cloud.cerebras.ai), OpenRouter (openrouter.ai/keys) or GitHub Models (github.com/settings/tokens).",
+      );
+    }
+    super(lines.join("\n"));
     this.name = "ChainExhausted";
   }
+}
+
+/** The provider's own words, trimmed — the friendly line can hide the cause. */
+function rawDetail(err: unknown): string {
+  const raw = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").trim();
+  return raw.length > 220 ? `${raw.slice(0, 217)}…` : raw;
 }
 
 /**
@@ -183,6 +198,7 @@ export async function* withFailover<T>(
 
   /** Providers whose model was swapped once already this request. */
   const substituted = new Set<string>();
+  const kinds = new Set<Failure>();
 
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
     let sawRateLimit = false;
@@ -200,7 +216,15 @@ export async function* withFailover<T>(
         if (err instanceof PartialOutput) throw err.inner;
 
         const kind = classify(err);
-        failures.set(p.label, `${p.label}: ${describeError(err, p.model, p.label)}`);
+        kinds.add(kind);
+        const friendly = describeError(err, p.model, p.label);
+        const detail = rawDetail(err);
+        failures.set(
+          p.label,
+          detail && !friendly.includes(detail)
+            ? `${p.label}: ${friendly} Provider said: "${detail}"`
+            : `${p.label}: ${friendly}`,
+        );
 
         if (kind === "rate") {
           sawRateLimit = true;
@@ -260,7 +284,9 @@ export async function* withFailover<T>(
     await sleep(wait, signal);
   }
 
-  throw new ChainExhausted([...failures.values()]);
+  const quotaOnly =
+    kinds.size > 0 && [...kinds].every((k) => k === "rate" || k === "credit");
+  throw new ChainExhausted([...failures.values()], quotaOnly);
 }
 
 /** A non-streaming attempt: drain the stream and hand back the text. */
@@ -374,12 +400,15 @@ export async function* runPipeline(a: PipelineArgs): AsyncGenerator<PipelineEven
   //    is no web access at all. Rebuilt on every failover.
   const modeFor = (p: ResolvedProvider): SearchMode =>
     a.research && p.canSearch ? "native" : retrieved ? "provided" : "none";
+  // Providers with a small per-minute budget get the compact persona: the
+  // same rules in a quarter of the tokens, paid on every request.
   const systemFor = (p: ResolvedProvider) =>
     buildSystem({
       jurisdiction: a.jurisdiction,
       language: a.language,
       search: modeFor(p),
       task: a.task,
+      compact: budgetFor(p) < COMPACT_BELOW_TOKENS,
     });
 
   // 3. Budget: the tightest in the chain, so a chunk sized for the first
