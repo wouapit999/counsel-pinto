@@ -10,6 +10,8 @@ import { ChainExhausted, runPipeline, type AttachedDocument } from "@/lib/pipeli
 import {
   DEFAULT_PROVIDER,
   PROVIDERS,
+  checkedKeys,
+  deploymentInfo,
   describeError,
   resolveProviders,
   type Turn,
@@ -40,11 +42,15 @@ export async function POST(req: NextRequest) {
 
   if (!provider) {
     const d = PROVIDERS[DEFAULT_PROVIDER];
+    const dep = deploymentInfo();
+    const where = dep.url
+      ? `deployment ${dep.url} (${dep.env ?? "unknown"} environment, commit ${dep.commit ?? "?"})`
+      : "this local server";
     return Response.json(
       {
         error:
           process.env.VERCEL === "1"
-            ? `No AI provider is configured on this deployment. Add ${d.envKey} (free — ${d.console}) to the Vercel project's environment variables and redeploy.`
+            ? `No AI provider is configured on ${where}. None of these variables is set here: ${checkedKeys().join(", ")}. If you added a key in the Vercel dashboard, make sure the Production environment is ticked and redeploy. If this is not your project's URL, open the app from your own Vercel dashboard. Free key: ${d.envKey} at ${d.console}.`
             : `No AI provider is configured. Copy .env.example to .env.local, add ${d.envKey} (free — ${d.console}), and restart the dev server.`,
       },
       { status: 500 },

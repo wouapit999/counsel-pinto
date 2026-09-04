@@ -101,4 +101,12 @@ export type ProviderStatus = {
    * "never runs out" actually means.
    */
   chain: { id: ProviderId; label: string; model: string }[];
+  /**
+   * Which deployment answered. When a user reports "no provider configured"
+   * this is what tells us whether they are on the wrong URL, on a Preview
+   * build that cannot see Production variables, or truly keyless.
+   */
+  deployment: { url: string | null; env: string | null; commit: string | null };
+  /** Every environment variable name the app looked for. Names only. */
+  checked: string[];
 };

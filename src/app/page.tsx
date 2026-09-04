@@ -987,6 +987,18 @@ function SetupNotice({
         — {status.pricing.toLowerCase()} Any other supported provider&apos;s key works
         too; the app picks up whichever it finds.
       </p>
+      <p className="mt-2 font-mono text-[11px] text-muted">
+        {status.deployment.url ?? "local dev server"}
+        {status.deployment.env ? ` · ${status.deployment.env}` : ""}
+        {status.deployment.commit ? ` · ${status.deployment.commit}` : ""}
+      </p>
+      <p className="mt-1 text-[11px] leading-relaxed text-muted">
+        None of these is set in this deployment&apos;s environment:{" "}
+        <span className="font-mono">{status.checked.join(", ")}</span>. If you added
+        one in the Vercel dashboard, tick <strong>Production</strong> and redeploy. If
+        the address above is not your project&apos;s, open the app from your own Vercel
+        dashboard.
+      </p>
     </div>
   );
 }

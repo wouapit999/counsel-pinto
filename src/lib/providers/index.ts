@@ -93,11 +93,27 @@ function searchStatus(active: ResolvedProvider | null): ProviderStatus["search"]
   return { mode: null, label: "no web access" };
 }
 
+/** Vercel sets these at build time; locally they are absent. Names and ids only. */
+export function deploymentInfo(): ProviderStatus["deployment"] {
+  return {
+    url: process.env.VERCEL_URL ?? null,
+    env: process.env.VERCEL_ENV ?? null,
+    commit: process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 7) ?? null,
+  };
+}
+
+/** The variable names the app looks for — so "none set" can say none of what. */
+export function checkedKeys(): string[] {
+  return PREFERENCE.map((id) => PROVIDERS[id].envKey);
+}
+
 /** Safe to send to the browser — contains no key material. */
 export function providerStatus(): ProviderStatus {
   const chain = resolveProviders();
   const active = chain[0] ?? null;
   const search = searchStatus(active);
+  const deployment = deploymentInfo();
+  const checked = checkedKeys();
 
   if (!active) {
     const fallback = PROVIDERS[DEFAULT_PROVIDER];
@@ -113,6 +129,8 @@ export function providerStatus(): ProviderStatus {
       configured: [],
       search,
       chain: [],
+      deployment,
+      checked,
     };
   }
 
@@ -129,5 +147,7 @@ export function providerStatus(): ProviderStatus {
     configured: chain.map((p) => p.id),
     search,
     chain: chain.map((p) => ({ id: p.id, label: p.label, model: p.model })),
+    deployment,
+    checked,
   };
 }
