@@ -14,6 +14,13 @@ export function describeError(err: unknown, model: string, label: string): strin
       : undefined;
   const raw = err instanceof Error ? err.message : String(err);
 
+  const retryAfterMs =
+    typeof err === "object" && err !== null && "retryAfterMs" in err
+      ? Number((err as { retryAfterMs?: unknown }).retryAfterMs)
+      : NaN;
+  if (status === 402 && Number.isFinite(retryAfterMs) && retryAfterMs > 0) {
+    return `${label}'s free lane is in use — it allows one request every 30 seconds per address, and that address is shared. Waiting for the next slot; a free key from ${label} removes the limit.`;
+  }
   if (status === 429 || /quota|rate.?limit|RESOURCE_EXHAUSTED|too many requests/i.test(raw)) {
     return `${label}'s rate limit was hit. Wait a minute and try again, or lower the analysis depth.`;
   }

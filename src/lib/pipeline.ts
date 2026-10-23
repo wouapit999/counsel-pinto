@@ -135,6 +135,9 @@ function classify(err: unknown): Failure {
       : undefined;
   const raw = err instanceof Error ? err.message : String(err);
   if (status === 429 || /rate.?limit|too many requests|RESOURCE_EXHAUSTED/i.test(raw)) return "rate";
+  // Pollinations' free lane answers "402 Payment Required" with a Retry-After
+  // when the per-IP slot is taken. That is a wait, not a missing credit card.
+  if (status === 402 && retryAfterOf(err) > 0) return "rate";
   if (status === 401 || status === 403 || /api key|unauthori[sz]ed|PERMISSION_DENIED|invalid.*token/i.test(raw)) return "auth";
   if (status === 404 || /not found|does not exist|unknown model|decommissioned|NOT_FOUND/i.test(raw)) return "model";
   if (status === 402 || /insufficient|credit|billing|payment/i.test(raw)) return "credit";

@@ -69,6 +69,21 @@ export type ProviderSpec = {
    * `baseUrl` is still used for `/models`.
    */
   chatUrl?: string;
+  /**
+   * A different API root to use when a key IS present. Pollinations serves
+   * its free lane at text.pollinations.ai and keyed traffic at
+   * gen.pollinations.ai/v1; both speak OpenAI's shape.
+   */
+  keyedBaseUrl?: string;
+  /**
+   * "json": ask for one complete JSON reply instead of a token stream. Used
+   * where the streaming path is the unreliable one (Pollinations' free lane
+   * queues streams and sometimes closes them empty; its plain reply either
+   * arrives whole or fails with a status we can act on). Default "stream".
+   */
+  requestStyle?: "stream" | "json";
+  /** Sampling temperature to send; omitted when undefined. */
+  temperature?: number;
   /** Does every model on this provider accept OpenAI's `reasoning_effort`? */
   supportsReasoningEffort: boolean;
   /** Models that accept it when the provider as a whole does not. */

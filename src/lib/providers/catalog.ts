@@ -153,20 +153,32 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     envKey: "POLLINATIONS_API_KEY",
     envModel: "POLLINATIONS_MODEL",
     // "openai" is the alias for GPT-OSS 20B — the only model on the anonymous
-    // tier. Verified 2026-10-23: keyless, streaming, and reasoning_effort
-    // accepted on the OpenAI-shaped POST path. The bare /openai path is slow
-    // under load and the GET /{prompt} path now returns 402, so neither is
-    // used. Under load a stream can open and end with no content; the
-    // adapter reports that as transient and the chain retries it.
+    // lane. This entry mirrors the Bouquet Innovation portal widget call for
+    // call: POST /openai, no stream flag, temperature 0.3, read
+    // choices[0].message.content. Verified 2026-10-23 against the live
+    // service: that call answers in 1–7s while /openai/chat/completions
+    // timed out (non-stream) or returned 500 / an empty stream (stream).
+    //
+    // The free lane is ONE request per IP every 30 seconds; the next one gets
+    // 402 + Retry-After, which the chain treats as "wait for the slot", not
+    // as "no credit". On Vercel the outbound IP is shared with other sites,
+    // so that slot is contested — a free key from enter.pollinations.ai
+    // (POLLINATIONS_API_KEY) removes the per-IP limit.
     defaultModel: "openai",
-    console: "https://pollinations.ai",
-    pricing: "Free public service, no key or account. Shared capacity — slower at busy times.",
+    console: "https://enter.pollinations.ai",
+    pricing:
+      "Free public service, no key needed. Free lane is one request per 30s per IP (shared on Vercel); a free key from enter.pollinations.ai lifts that.",
     free: true,
     keyless: true,
     supportsSearch: false,
-    supportsReasoningEffort: true,
+    supportsReasoningEffort: false,
     baseUrl: "https://text.pollinations.ai",
-    chatUrl: "https://text.pollinations.ai/openai/chat/completions",
+    chatUrl: "https://text.pollinations.ai/openai",
+    // Keyed traffic lives on a different host; same OpenAI shape, no per-IP
+    // limit, full model catalogue (GET /v1/models). Old aliases still work.
+    keyedBaseUrl: "https://gen.pollinations.ai/v1",
+    requestStyle: "json",
+    temperature: 0.3,
     requestBudget: 12000,
   },
   perplexity: {

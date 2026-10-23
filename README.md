@@ -44,7 +44,9 @@ Open http://localhost:3000. If no key is set the app still runs and tells you wh
 
 ## Providers
 
-**No key is required.** The chain always ends in **Pollinations**, a free public endpoint that needs no key or account — the same one the Bouquet Innovation portal's widget runs on. With nothing configured, the app answers from it; with keys configured, those are used first and Pollinations only steps in when they are out. It serves GPT-OSS 20B on shared capacity, so it can be slow at busy times, and it cannot search the web on its own (set a `TAVILY_API_KEY` and it will).
+**No key is required.** The chain always ends in **Pollinations**, a free public endpoint that needs no key or account, called exactly the way the Bouquet Innovation portal's widget calls it (plain reply from `/openai`, temperature 0.3). With nothing configured, the app answers from it; with keys configured, those are used first and Pollinations only steps in when they are out. It serves GPT-OSS 20B and cannot search the web on its own (set a `TAVILY_API_KEY` and it will).
+
+Its free lane has one hard rule: **one request per IP address every 30 seconds.** The next request gets a 402 with a Retry-After, which the app treats as "wait for the slot" and does. On a laptop that is fine. On Vercel the outbound IP is shared with other people's sites, so the slot is contested and waits are common. A key from enter.pollinations.ai (`POLLINATIONS_API_KEY`) removes the per-IP limit; it starts with free credit and is paid beyond that. The simplest way to a smooth site is still one free key from Groq or Cerebras in front of Pollinations.
 
 | Provider | Free? | Web search | Key |
 | --- | --- | --- | --- |

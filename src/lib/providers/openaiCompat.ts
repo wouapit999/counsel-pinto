@@ -63,6 +63,16 @@ export function transient(message: string, status?: number) {
   return Object.assign(new Error(message), { transient: true, status });
 }
 
+/** API root for this request: the keyed one when a key is present and the provider has one. */
+function rootFor(spec: ResolvedProvider): string {
+  return spec.apiKey && spec.keyedBaseUrl ? spec.keyedBaseUrl : spec.baseUrl;
+}
+
+function chatUrlFor(spec: ResolvedProvider): string {
+  if (spec.apiKey && spec.keyedBaseUrl) return `${spec.keyedBaseUrl}/chat/completions`;
+  return spec.chatUrl ?? `${spec.baseUrl}/chat/completions`;
+}
+
 function add(into: Map<string, Source>, url?: string, title?: string) {
   if (!url || into.has(url)) return;
   into.set(url, { title: title || hostOf(url), url, host: hostOf(url) });
@@ -123,18 +133,21 @@ export const openAiCompatAdapter: Adapter = async function* (spec, args) {
   arm(FIRST_BYTE_MS);
   let res: Response;
   try {
-    res = await fetch(spec.chatUrl ?? `${spec.baseUrl}/chat/completions`, {
+    res = await fetch(chatUrlFor(spec), {
       method: "POST",
       headers,
       signal: ctl.signal,
       body: JSON.stringify({
-      model: spec.model,
-      stream: true,
-      max_tokens: 8192,
-      messages: [
-        { role: "system", content: args.system },
-        ...args.turns.map((t) => ({ role: t.role, content: t.content })),
-      ],
+        model: spec.model,
+        messages: [
+          { role: "system", content: args.system },
+          ...args.turns.map((t) => ({ role: t.role, content: t.content })),
+        ],
+        // The plain-reply style sends what the portal widget sends and no
+        // more: no stream flag, no max_tokens, no reasoning knob. The fewer
+        // options a shared free lane has to honour, the fewer ways it fails.
+        ...(spec.requestStyle === "json" ? {} : { stream: true, max_tokens: 8192 }),
+        ...(spec.temperature !== undefined ? { temperature: spec.temperature } : {}),
         ...(spec.supportsReasoningEffort || spec.reasoningModels?.test(spec.model)
           ? { reasoning_effort: REASONING[args.effort] ?? "medium" }
           : {}),
@@ -311,7 +324,7 @@ export function chooseModel(ids: string[], current?: string): string | null {
  * rejected, so the chain can switch to something that exists.
  */
 export async function listModels(spec: ResolvedProvider): Promise<string[]> {
-  const res = await fetch(`${spec.baseUrl}/models`, {
+  const res = await fetch(`${rootFor(spec)}/models`, {
     headers: spec.apiKey ? { Authorization: `Bearer ${spec.apiKey}` } : {},
   });
   if (!res.ok) return [];
