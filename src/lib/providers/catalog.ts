@@ -147,6 +147,26 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     baseUrl: "https://api.deepseek.com/v1",
     requestBudget: 60000,
   },
+  pollinations: {
+    id: "pollinations",
+    label: "Pollinations",
+    envKey: "POLLINATIONS_API_KEY",
+    envModel: "POLLINATIONS_MODEL",
+    // "openai" is the alias for GPT-OSS 20B on the anonymous tier. Verified
+    // 2026-10-23: keyless, streaming, and reasoning_effort accepted. The
+    // bare /openai path also works but timed out under load; the standard
+    // /chat/completions path did not.
+    defaultModel: "openai",
+    console: "https://pollinations.ai",
+    pricing: "Free public service, no key or account. Shared capacity — slower at busy times.",
+    free: true,
+    keyless: true,
+    supportsSearch: false,
+    supportsReasoningEffort: true,
+    baseUrl: "https://text.pollinations.ai",
+    chatUrl: "https://text.pollinations.ai/openai/chat/completions",
+    requestBudget: 12000,
+  },
   perplexity: {
     id: "perplexity",
     label: "Perplexity",
@@ -178,6 +198,8 @@ export const PREFERENCE: ProviderId[] = [
   "perplexity",
   "sambanova",
   "deepseek",
+  // Keyless, so always present: the floor the chain can never fall through.
+  "pollinations",
 ];
 
 /** Does this specific model retrieve live sources? */

@@ -10,7 +10,8 @@ export type ProviderId =
   | "openrouter"
   | "github"
   | "deepseek"
-  | "perplexity";
+  | "perplexity"
+  | "pollinations";
 
 export type Turn = { role: "user" | "assistant"; content: string };
 
@@ -57,6 +58,17 @@ export type ProviderSpec = {
    * resolved model, not of the provider alone.
    */
   searchModels?: RegExp;
+  /**
+   * Works with no key at all. Such a provider is always in the chain, which
+   * is what guarantees the app never reports "no provider configured". A key
+   * in `envKey` is still honoured if present (paid tiers).
+   */
+  keyless?: boolean;
+  /**
+   * Full chat-completions URL when it is not `${baseUrl}/chat/completions`.
+   * `baseUrl` is still used for `/models`.
+   */
+  chatUrl?: string;
   /** Does every model on this provider accept OpenAI's `reasoning_effort`? */
   supportsReasoningEffort: boolean;
   /** Models that accept it when the provider as a whole does not. */

@@ -19,8 +19,11 @@ export function rememberModel(id: ProviderId, model: string) {
   discovered.set(id, model);
 }
 
-/** The provider suggested when nothing is configured yet. */
-export const DEFAULT_PROVIDER: ProviderId = "groq";
+/**
+ * The provider named in setup guidance. With a keyless provider in the
+ * catalog this branch is unreachable in practice, but it stays as the floor.
+ */
+export const DEFAULT_PROVIDER: ProviderId = "pollinations";
 
 /**
  * Providers that recently hit a rate limit, with the time the limit is
@@ -37,14 +40,19 @@ function coolingDown(id: ProviderId): boolean {
   return (cooldown.get(id) ?? 0) > Date.now();
 }
 
+/**
+ * The key to use, or "" for a keyless provider, or undefined when the
+ * provider is not configured at all.
+ */
 function keyFor(id: ProviderId): string | undefined {
-  const value = process.env[PROVIDERS[id].envKey];
-  return value && value.trim() ? value.trim() : undefined;
+  const value = process.env[PROVIDERS[id].envKey]?.trim();
+  if (value) return value;
+  return PROVIDERS[id].keyless ? "" : undefined;
 }
 
 function resolve(id: ProviderId): ResolvedProvider | null {
   const apiKey = keyFor(id);
-  if (!apiKey) return null;
+  if (apiKey === undefined) return null;
   const spec = PROVIDERS[id];
   const model =
     process.env[spec.envModel]?.trim() || discovered.get(id) || spec.defaultModel;

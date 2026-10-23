@@ -65,17 +65,17 @@ function collect(chunk: Chunk, into: Map<string, Source>) {
 }
 
 export const openAiCompatAdapter: Adapter = async function* (spec, args) {
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Authorization: `Bearer ${spec.apiKey}`,
-  };
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  // A keyless provider gets no Authorization header at all — an empty
+  // bearer is rejected by some servers, and a present key (paid tier) is sent.
+  if (spec.apiKey) headers.Authorization = `Bearer ${spec.apiKey}`;
   // OpenRouter attributes traffic with these; harmless elsewhere.
   if (spec.id === "openrouter") {
     headers["HTTP-Referer"] = "https://counsel-pinto.vercel.app";
     headers["X-Title"] = "Counsel Pinto";
   }
 
-  const res = await fetch(`${spec.baseUrl}/chat/completions`, {
+  const res = await fetch(spec.chatUrl ?? `${spec.baseUrl}/chat/completions`, {
     method: "POST",
     headers,
     signal: args.signal,
@@ -220,12 +220,16 @@ export function chooseModel(ids: string[], current?: string): string | null {
  */
 export async function listModels(spec: ResolvedProvider): Promise<string[]> {
   const res = await fetch(`${spec.baseUrl}/models`, {
-    headers: { Authorization: `Bearer ${spec.apiKey}` },
+    headers: spec.apiKey ? { Authorization: `Bearer ${spec.apiKey}` } : {},
   });
   if (!res.ok) return [];
-  const data = (await res.json()) as { data?: { id?: string }[] };
-  return (data.data ?? [])
-    .map((m) => m.id)
+  // OpenAI shape is {data:[{id}]}; Pollinations returns a bare [{name}].
+  const json = (await res.json()) as
+    | { data?: { id?: string }[] }
+    | { id?: string; name?: string }[];
+  const items = Array.isArray(json) ? json : (json.data ?? []);
+  return items
+    .map((m) => ("id" in m && m.id) || ("name" in m ? m.name : undefined))
     .filter((id): id is string => typeof id === "string" && id.length > 0)
     .sort();
 }

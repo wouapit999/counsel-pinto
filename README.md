@@ -44,8 +44,11 @@ Open http://localhost:3000. If no key is set the app still runs and tells you wh
 
 ## Providers
 
+**No key is required.** The chain always ends in **Pollinations**, a free public endpoint that needs no key or account — the same one the Bouquet Innovation portal's widget runs on. With nothing configured, the app answers from it; with keys configured, those are used first and Pollinations only steps in when they are out. It serves GPT-OSS 20B on shared capacity, so it can be slow at busy times, and it cannot search the web on its own (set a `TAVILY_API_KEY` and it will).
+
 | Provider | Free? | Web search | Key |
 | --- | --- | --- | --- |
+| **Pollinations** | Yes — no key, no account | No | none needed |
 | **Groq** | Yes, no card | On `compound` models | console.groq.com/keys |
 | **NVIDIA NIM** | Yes, with a developer account — serves DeepSeek V4 | No | build.nvidia.com |
 | Cerebras | Yes, no card | No | cloud.cerebras.ai |
