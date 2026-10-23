@@ -37,8 +37,31 @@ type Chunk = {
   citations?: string[];
   /** Perplexity: richer form, preferred when present. */
   search_results?: SearchResult[];
-  error?: { message?: string; code?: string | number };
+  /** OpenAI shape is an object; some gateways put a bare string here. */
+  error?: { message?: string; code?: string | number } | string;
 };
+
+function errorText(e: Chunk["error"]): string | undefined {
+  return typeof e === "string" ? e : e?.message;
+}
+
+/**
+ * How long to wait for the first byte, and then between bytes. Shared public
+ * endpoints (Pollinations) take 20–60s to start under load and sometimes
+ * open a stream and never finish it; without a cap such a request would sit
+ * for the function's whole lifetime instead of being retried.
+ */
+const FIRST_BYTE_MS = 70_000;
+const IDLE_MS = 45_000;
+
+/**
+ * A failure that says nothing about the key, the model or the quota — the
+ * provider was simply unable to answer this time. The chain retries these on
+ * the same provider before moving on.
+ */
+export function transient(message: string, status?: number) {
+  return Object.assign(new Error(message), { transient: true, status });
+}
 
 function add(into: Map<string, Source>, url?: string, title?: string) {
   if (!url || into.has(url)) return;
@@ -75,11 +98,36 @@ export const openAiCompatAdapter: Adapter = async function* (spec, args) {
     headers["X-Title"] = "Counsel Pinto";
   }
 
-  const res = await fetch(spec.chatUrl ?? `${spec.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers,
-    signal: args.signal,
-    body: JSON.stringify({
+  // One controller for both the caller's cancel and our own stall timer. A
+  // stall is reported as a transient failure, never as the user's abort.
+  const ctl = new AbortController();
+  let stalled = false;
+  const onAbort = () => ctl.abort();
+  if (args.signal?.aborted) ctl.abort();
+  else args.signal?.addEventListener("abort", onAbort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = (ms: number) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      stalled = true;
+      ctl.abort();
+    }, ms);
+  };
+  const disarm = () => {
+    if (timer) clearTimeout(timer);
+    args.signal?.removeEventListener("abort", onAbort);
+  };
+  const stall = (what: string) =>
+    transient(`${spec.label} ${what} — it is busy; the request will be retried.`);
+
+  arm(FIRST_BYTE_MS);
+  let res: Response;
+  try {
+    res = await fetch(spec.chatUrl ?? `${spec.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers,
+      signal: ctl.signal,
+      body: JSON.stringify({
       model: spec.model,
       stream: true,
       max_tokens: 8192,
@@ -87,14 +135,22 @@ export const openAiCompatAdapter: Adapter = async function* (spec, args) {
         { role: "system", content: args.system },
         ...args.turns.map((t) => ({ role: t.role, content: t.content })),
       ],
-      ...(spec.supportsReasoningEffort || spec.reasoningModels?.test(spec.model)
-        ? { reasoning_effort: REASONING[args.effort] ?? "medium" }
-        : {}),
-    }),
-  });
+        ...(spec.supportsReasoningEffort || spec.reasoningModels?.test(spec.model)
+          ? { reasoning_effort: REASONING[args.effort] ?? "medium" }
+          : {}),
+      }),
+    });
+  } catch (err) {
+    disarm();
+    if (stalled) throw stall(`sent nothing for ${FIRST_BYTE_MS / 1000}s`);
+    if (args.signal?.aborted) throw err;
+    // DNS, TLS, reset — the provider was never reached. Retryable.
+    throw transient(`${spec.label} could not be reached: ${(err as Error)?.message ?? String(err)}`);
+  }
 
   if (!res.ok || !res.body) {
     const detail = await res.text().catch(() => "");
+    disarm();
     let message = detail.slice(0, 400);
     try {
       const parsed = JSON.parse(detail) as { error?: { message?: string } };
@@ -122,59 +178,95 @@ export const openAiCompatAdapter: Adapter = async function* (spec, args) {
   let announced = spec.canSearch && args.research;
   if (announced) yield { type: "searching", active: true };
 
+  // A gateway that ignores `stream: true` answers with one JSON document.
+  // Read it as such rather than scanning it for "data:" lines and finding none.
+  if (/application\/json/i.test(res.headers.get("content-type") ?? "")) {
+    let body: Chunk;
+    try {
+      body = (await res.json()) as Chunk;
+    } catch (err) {
+      disarm();
+      if (stalled) throw stall("stopped mid-response");
+      throw err;
+    }
+    disarm();
+    const msg = errorText(body.error);
+    if (msg) throw transient(msg);
+    collect(body, sources);
+    const text = body.choices?.[0]?.message?.content ?? "";
+    if (announced) yield { type: "searching", active: false };
+    if (sources.size > 0) yield { type: "sources", sources: [...sources.values()] };
+    if (!text) throw transient(`${spec.label} returned an empty response.`);
+    yield { type: "text", text };
+    return;
+  }
+
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
 
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    // SSE frames are separated by a blank line, but many providers emit one
-    // "data:" line per newline — splitting on newline handles both.
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("data:")) continue;
-      const payload = trimmed.slice(5).trim();
-      if (!payload || payload === "[DONE]") continue;
-
-      let chunk: Chunk;
+  try {
+    for (;;) {
+      arm(IDLE_MS);
+      let step: Awaited<ReturnType<typeof reader.read>>;
       try {
-        chunk = JSON.parse(payload) as Chunk;
-      } catch {
-        continue; // partial frame; the next read completes it
-      }
-
-      if (chunk.error?.message) {
-        throw new Error(chunk.error.message);
-      }
-
-      collect(chunk, sources);
-
-      const text = chunk.choices?.[0]?.delta?.content;
-      if (text) {
-        if (announced) {
-          announced = false;
-          yield { type: "searching", active: false };
+        step = await reader.read();
+      } catch (err) {
+        if (stalled) {
+          throw stall(produced ? "stopped mid-answer" : `went silent for ${IDLE_MS / 1000}s`);
         }
-        produced = true;
-        yield { type: "text", text };
+        throw err;
+      }
+      if (step.done) break;
+      buffer += decoder.decode(step.value, { stream: true });
+
+      // SSE frames are separated by a blank line, but many providers emit one
+      // "data:" line per newline — splitting on newline handles both.
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (!payload || payload === "[DONE]") continue;
+
+        let chunk: Chunk;
+        try {
+          chunk = JSON.parse(payload) as Chunk;
+        } catch {
+          continue; // partial frame; the next read completes it
+        }
+
+        // An error frame inside a 200 stream is the gateway's upstream
+        // failing, so it is retryable — unless its wording says quota or key,
+        // which the chain's classifier checks first.
+        const msg = errorText(chunk.error);
+        if (msg) throw transient(msg);
+
+        collect(chunk, sources);
+
+        const text = chunk.choices?.[0]?.delta?.content;
+        if (text) {
+          if (announced) {
+            announced = false;
+            yield { type: "searching", active: false };
+          }
+          produced = true;
+          yield { type: "text", text };
+        }
       }
     }
+  } finally {
+    disarm();
   }
 
   if (announced) yield { type: "searching", active: false };
   if (sources.size > 0) yield { type: "sources", sources: [...sources.values()] };
-  if (!produced) {
-    yield {
-      type: "notice",
-      text: `${spec.label} returned an empty response. Rephrase the question, or try a different model.`,
-    };
-  }
+  // A stream that closed cleanly with no content is the provider failing
+  // quietly — under load Pollinations does exactly this. Thrown, not shown,
+  // so the chain retries it instead of leaving the user with a blank answer.
+  if (!produced) throw transient(`${spec.label} returned an empty response.`);
 };
 
 /**

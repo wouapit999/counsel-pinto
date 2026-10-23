@@ -118,7 +118,15 @@ function sleep(ms: number, signal?: AbortSignal) {
 
 const isAbort = (err: unknown) => (err as Error)?.name === "AbortError";
 
-type Failure = "rate" | "auth" | "model" | "credit" | "other";
+type Failure = "rate" | "auth" | "model" | "credit" | "transient" | "other";
+
+/**
+ * How many extra tries a provider gets when it fails for no reason of ours —
+ * an empty stream, a dropped connection, a 5xx. Shared public endpoints do
+ * this under load and usually answer on the next try.
+ */
+const TRANSIENT_RETRIES = 2;
+const TRANSIENT_BACKOFF_MS = 1_500;
 
 function classify(err: unknown): Failure {
   const status =
@@ -130,6 +138,13 @@ function classify(err: unknown): Failure {
   if (status === 401 || status === 403 || /api key|unauthori[sz]ed|PERMISSION_DENIED|invalid.*token/i.test(raw)) return "auth";
   if (status === 404 || /not found|does not exist|unknown model|decommissioned|NOT_FOUND/i.test(raw)) return "model";
   if (status === 402 || /insufficient|credit|billing|payment/i.test(raw)) return "credit";
+  if (
+    (typeof err === "object" && err !== null && (err as { transient?: boolean }).transient) ||
+    (status !== undefined && status >= 500) ||
+    /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|network|timed out|empty response|interrupted|overloaded|unavailable/i.test(raw)
+  ) {
+    return "transient";
+  }
   return "other";
 }
 
@@ -138,6 +153,7 @@ const FAILURE_LABEL: Record<Failure, string> = {
   auth: "key rejected",
   model: "model not available",
   credit: "no credit",
+  transient: "no response",
   other: "error",
 };
 
@@ -200,6 +216,8 @@ export async function* withFailover<T>(
 
   /** Providers whose model was swapped once already this request. */
   const substituted = new Set<string>();
+  /** Same-provider retries spent on empty or dropped responses. */
+  const retried = new Map<string, number>();
   const kinds = new Set<Failure>();
 
   for (let round = 0; round < MAX_ROUNDS; round += 1) {
@@ -240,6 +258,24 @@ export async function* withFailover<T>(
                 : `${p.label} hit its free-tier limit while ${label}.`,
           };
           continue;
+        }
+
+        if (kind === "transient") {
+          // Nothing wrong with the key, model or quota — the provider just
+          // failed to deliver. Give it another go or two before moving on;
+          // for the keyless floor this is the difference between an answer
+          // and a blank.
+          const n = (retried.get(p.id) ?? 0) + 1;
+          if (n <= TRANSIENT_RETRIES) {
+            retried.set(p.id, n);
+            yield {
+              type: "progress",
+              text: `${p.label} did not answer — retrying (${n} of ${TRANSIENT_RETRIES})…`,
+            };
+            await sleep(TRANSIENT_BACKOFF_MS * n, signal);
+            queue.unshift(p);
+            continue;
+          }
         }
 
         if (kind === "model") {

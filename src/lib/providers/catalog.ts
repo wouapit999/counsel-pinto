@@ -152,10 +152,12 @@ export const PROVIDERS: Record<ProviderId, ProviderSpec> = {
     label: "Pollinations",
     envKey: "POLLINATIONS_API_KEY",
     envModel: "POLLINATIONS_MODEL",
-    // "openai" is the alias for GPT-OSS 20B on the anonymous tier. Verified
-    // 2026-10-23: keyless, streaming, and reasoning_effort accepted. The
-    // bare /openai path also works but timed out under load; the standard
-    // /chat/completions path did not.
+    // "openai" is the alias for GPT-OSS 20B — the only model on the anonymous
+    // tier. Verified 2026-10-23: keyless, streaming, and reasoning_effort
+    // accepted on the OpenAI-shaped POST path. The bare /openai path is slow
+    // under load and the GET /{prompt} path now returns 402, so neither is
+    // used. Under load a stream can open and end with no content; the
+    // adapter reports that as transient and the chain retries it.
     defaultModel: "openai",
     console: "https://pollinations.ai",
     pricing: "Free public service, no key or account. Shared capacity — slower at busy times.",

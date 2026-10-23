@@ -30,5 +30,12 @@ export function describeError(err: unknown, model: string, label: string): strin
   if (status === 402 || /insufficient|credit|billing|payment/i.test(raw)) {
     return `${label} reports insufficient credit for this request.`;
   }
+  if (
+    (typeof err === "object" && err !== null && (err as { transient?: boolean }).transient) ||
+    (status !== undefined && status >= 500) ||
+    /fetch failed|ECONNRESET|ETIMEDOUT|socket hang up|timed out|empty response|interrupted/i.test(raw)
+  ) {
+    return `${label} did not deliver an answer — it is busy or briefly unreachable. Nothing is wrong with the setup; try again in a moment.`;
+  }
   return raw || `${label} failed unexpectedly.`;
 }
